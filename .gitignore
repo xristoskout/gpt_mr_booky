@@ -1,0 +1,12 @@
+# ΜΗΝ ανεβάζεις ποτέ τα ευαίσθητα αρχεία
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.idea/
+.vscode/
+*.sqlite3
+instance/
