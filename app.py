@@ -1,23 +1,33 @@
 import os
-from flask import Flask, request, jsonify
-from openai import OpenAI
-from dotenv import load_dotenv
+import json
+import string
 import requests
 import unicodedata
-import re
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from openai import OpenAI
+from dotenv import load_dotenv
+from difflib import SequenceMatcher
 
+# --- Environment & OpenAI Client ---
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key)
 
+# --- Flask App ---
 app = Flask(__name__)
+CORS(app)
 
-PHARMACY_API_URL = "https://pharmacy-api-160866660933.europe-west1.run.app/pharmacy"
-DISTANCE_API_URL = "https://distance-api-160866660933.europe-west1.run.app/calculate_route_and_fare"
-HOSPITAL_API_URL = "https://patra-hospitals-webhook-160866660933.europe-west1.run.app/"
-TIMOLOGIO_API_URL = "https://timologio-160866660933.europe-west1.run.app/calculate_fare"
+# --- External API URLs ---
+PHARMACY_API_URL   = "https://pharmacy-api-160866660933.europe-west1.run.app/pharmacy"
+DISTANCE_API_URL   = "https://distance-api-160866660933.europe-west1.run.app/calculate_route_and_fare"
+HOSPITAL_API_URL   = "https://patra-hospitals-webhook-160866660933.europe-west1.run.app/"
+TIMOLOGIO_API_URL  = "https://timologio-160866660933.europe-west1.run.app/calculate_fare"
 
-# --- SYSTEM PROMPT με όλες τις πληροφορίες και FAQ ---
+# --- In-memory Sessions ---
+SESSIONS = {}
+
+# --- System Prompt for fallback GPT ---
 SYSTEM_PROMPT = """
 Είσαι ο Mr Booky, ο ψηφιακός βοηθός του Taxi Express Πάτρας (https://taxipatras.com).
 - Άμεση εξυπηρέτηση 24/7 – 365 ημέρες το χρόνο
@@ -45,200 +55,306 @@ SYSTEM_PROMPT = """
 Αν δεν καταλαβαίνεις, δίνεις επιλογές/κατηγορίες. Κλείνεις πάντα: "Ευχαριστώ πολύ που επικοινώνησες μαζί μας! Αν χρειαστείς κάτι άλλο, είμαστε εδώ."
 """
 
-# --- Fuzzy location/area aliases ---
+# --- Load Intents ---
+def load_intents():
+    with open("intents.json", encoding="utf-8") as f:
+        return json.load(f)
+INTENTS = load_intents()
+
+# --- Text Utilities ---
+def strip_accents(text: str) -> str:
+    return ''.join(ch for ch in unicodedata.normalize('NFD', text)
+                   if unicodedata.category(ch) != 'Mn')
+
+def normalize_text(text: str) -> str:
+    t = strip_accents(text.lower())
+    return t.translate(str.maketrans('', '', string.punctuation))
+
+# --- Area Aliases for Pharmacy (only in bot) ---
 AREA_ALIASES = {
-    "Πάτρα": ["πάτρα", "patra", "pátra", "πτρα"],
-    "Μεσσάτιδα": ["μεσσάτιδα", "μεσατιδα", "messatida", "μεσσατιδα", "μεσσιτιδα"],
-    "Βραχνέικα": ["βραχνέικα", "βραχνει", "vrahneika", "βραχνεϊκα", "βραχνεικ", "βραχνεικα"],
-    "Οβρυά": ["οβρυά", "ovria", "οβρια", "οβρυα"],
-    "Ρίο": ["ριο", "rio", "ριον", "ριου"],
-    "Αθήνα": ["αθήνα", "athina", "athens"],
-    "Νοσοκομείο Ρίο": [
-        "νοσοκομειο ριον", "νοσοκομειο ριο", "πανεπιστημιακο νοσοκομειο πατρας", "gpph", "pgnp",
-        "rio hospital", "ριου νοσοκομειο", "νοσοκομειο ριου", "νοσ ριου", "νοσ. ριου"
-    ],
-    "Άνω Διάκοπτο": ["ανω διακοπτο", "ανω διακοπτ", "διακοπτο"],
-    "Αγιος Ανδρέας": ["αγιος ανδρεας", "andreas"],
-    "Καραμανδάνειο": ["καραμανδάνειο", "karamandaneio", "παιδων", "νοσοκομειο παιδων"],
+    "ριο":             "Ρίο",
+    "ριον":            "Ρίο",
+    "πατρα":           "Πτρα",
+    "πατρας":          "Πάτρα",
+    "παραλια πατρων":  "Παραλία Πατρα",
+    "παραλια":         "Παραλία Πατρών",
+    "οβρυα":           "Οβριά",
+    "μεσατιδα":        "Οβρυά",
+    "μεσσατιδα":       "Οβρυά",
+    "βραχνεικα":       "Βραχν",
+    "rio":             "Ρίο",
+    "πατραι":          "Πτρα",
+    "πατρας":          "Πάτρα",
+    "παραλια πατρων":  "Παραλ",
+    "παραλια":         "Παραλία Πατρών",
+    "οβρυα":           "Οβριά",
+    "μεσατιδα":        "obria",
+    "μεσσατιδα":       "Οβρυά",
+    "βραχνεικα":       "Βραχν",
 }
 
-# --- Fuzzy utilities ---
-def strip_accents(text):
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', text)
-        if unicodedata.category(c) != 'Mn'
-    )
-
-def fuzzy_match_area(msg):
-    msg = strip_accents(msg.lower())
-    for area, aliases in AREA_ALIASES.items():
-        for alias in aliases:
-            if strip_accents(alias) in msg:
-                return area
+def extract_area(message: str) -> str | None:
+    msg = normalize_text(message)
+    for alias, canon in AREA_ALIASES.items():
+        if alias in msg:
+            return canon
     return None
 
-# --- INTENT DETECTION (επίπεδο φράσης) ---
-def detect_intent_and_entities(message):
-    msg = strip_accents(message.lower())
-    # Κόστος διαδρομής (ταξί)
-    cost_keywords = ["πόσο κοστίζει", "πόσο στοιχίζει", "τιμή ταξί", "πόσο κάνει", "πόσο πάει", "τι χρεώνει", "τιμή", "πόσα χρήματα", "πόσο πληρώνω", "πόσα λεφτά", "κοστος", "ποσο ειναι"]
-    place_patterns = re.compile(r"(από|απ|απο|μεχρι|για|ως|προς|σε|στο|στη|στην|στον|απο|έως|μέχρι|ως|σε|για) ([^ ]+)", re.IGNORECASE)
-    found_cost = any(k in msg for k in cost_keywords)
-    # Βρες δυο τοπωνύμια (fuzzy)
-    areas_found = []
-    for area, aliases in AREA_ALIASES.items():
-        for alias in aliases:
-            if strip_accents(alias) in msg and area not in areas_found:
-                areas_found.append(area)
-    if found_cost and len(areas_found) >= 2:
-        return "distance_fare", areas_found  # πχ ["Πάτρα", "Αθήνα"]
-    # Αν έχει μία τοποθεσία ή λέξη που ταιριάζει μόνο σε φαρμακείο
-    pharmacy_kw = ["φαρμακ", "εφημερ", "διανυκτ", "pharmacy", "pharmakeio"]
-    if any(word in msg for word in pharmacy_kw):
-        return "pharmacy", areas_found
-    # Αν ρωτά για νοσοκομείο
-    hospital_kw = ["νοσοκομ", "νοσοκ", "hospital", "παίδων", "ανδρεας"]
-    if any(word in msg for word in hospital_kw):
-        return "hospital", areas_found
-    # Ελάχιστη αποζημίωση / σημαία / ραδιοταξί
-    min_kw = ["ελάχιστη", "σημαία", "start", "flag", "πτωσ", "πτώση", "minimum", "κουρσα", "βασική", "πρωτη χρεωση"]
-    if any(word in msg for word in min_kw):
-        return "minimum_fare", []
-    # Τιμοκατάλογος/ταρίφα/νυχτερινή
-    fare_kw = ["ταρίφα", "τιμολόγιο", "νυχτερινή", "διπλή ταρίφα", "κοστολόγιο"]
-    if any(word in msg for word in fare_kw):
-        return "fare_info", []
-    # Χρέωση αναμονής
-    if "αναμονή" in msg or "αναμονης" in msg:
-        return "wait_fare", []
-    return "default", []
+# --- Intent Classification ---
+def fuzzy_match(message: str) -> str:
+    best_score, best_intent = 0.0, "default"
+    msg_norm = normalize_text(message)
+    for intent, data in INTENTS.items():
+        for ex in data.get("examples", []):
+            score = SequenceMatcher(None, normalize_text(ex), msg_norm).ratio()
+            if score > best_score:
+                best_score, best_intent = score, intent
+    return best_intent if best_score > 0.8 else "default"
 
-# --- APIs Callers ---
-def get_on_duty_pharmacies(area="Πάτρα"):
-    params = {"area": area}
+def gpt_intent_classifier(message: str) -> str:
     try:
-        resp = requests.get(PHARMACY_API_URL, params=params, timeout=5)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print("Pharmacy API error:", str(e))
-        return {"error": "Το σύστημα εφημερευόντων φαρμακείων δεν είναι διαθέσιμο αυτή τη στιγμή."}
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content":
+                    "Κατάταξε το μήνυμα σε ένα από τα intents: "
+                    "[OnDutyPharmacyIntent, HospitalIntent, ContactInfoIntent, "
+                    "PricingInfoIntent, ServicesAndToursIntent, TripCostIntent, EndConversationIntent]. "
+                    "Επέστρεψε μόνο το όνομα."},
+                {"role": "user", "content": message}
+            ]
+        )
+        return resp.choices[0].message.content.strip()
+    except:
+        return "default"
 
-def get_hospital_info():
+def keyword_boosted_intent(message: str) -> str | None:
+    msg = normalize_text(message)
+    if "φαρμακει" in msg:
+        return "OnDutyPharmacyIntent"
+    if "νοσοκομει" in msg:
+        return "HospitalIntent"
+    if "αποσκευ" in msg or "βαλιτσ" in msg:
+        return "PricingInfoIntent"
+    if any(kw in msg for kw in ("ποσα χιλιομετρα","κοστος διαδρομης","μεχρι")):
+        return "TripCostIntent"
+    if any(bye in msg for bye in ("ευχαριστ","αντιο","bye","goodbye")):
+        return "EndConversationIntent"
+    if any(srv in msg for srv in ("εκδρομ","τουριστ","courier","night","σχολ")):
+        # γενικό hint για υπηρεσίες
+        return "ServicesAndToursIntent"
+    return None
+
+def detect_intent(message: str) -> str:
+    boosted = keyword_boosted_intent(message)
+    if boosted:
+        return boosted
+    intent = fuzzy_match(message)
+    if intent != "default":
+        return intent
+    return gpt_intent_classifier(message)
+
+# --- Trip Cost Extraction ---
+def extract_destination(message: str) -> str | None:
+    words = normalize_text(message).split()
+    for w in reversed(words):
+        if w not in {"απο","μεχρι","ως","για","εως"}:
+            return w.title()
+    return None
+
+# --- API Calls ---
+def get_on_duty_pharmacies(area: str) -> dict:
     try:
-        resp = requests.post(HOSPITAL_API_URL, json={}, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        # API μπορεί να έχει fulfillmentText ή άλλο πεδίο
-        return data.get("fulfillmentText") or data.get("text") or "Δεν βρέθηκαν νοσοκομεία."
-    except Exception as e:
-        print("Hospital API error:", str(e))
-        return "Το σύστημα εφημερευόντων νοσοκομείων δεν είναι διαθέσιμο αυτή τη στιγμή."
+        app.logger.debug(f"[PharmacyAPI] area={area}")
+        r = requests.get(PHARMACY_API_URL, params={"area": area}, timeout=5)
+        app.logger.debug(f"[PharmacyAPI] {r.status_code} {r.text[:200]}")
+        return r.json()
+    except:
+        return {"error": "Σφάλμα σύνδεσης με API φαρμακείων."}
 
-def get_distance_fare(origin, destination):
-    data = {"origin": origin, "destination": destination}
+def get_hospital_info() -> str:
     try:
-        resp = requests.post(DISTANCE_API_URL, json=data, timeout=8)
-        resp.raise_for_status()
-        d = resp.json()
-        if d.get("error"):
-            return None, d.get("error")
-        return d, None
-    except Exception as e:
-        print("Distance API error:", str(e))
-        return None, "Το σύστημα διαδρομών δεν είναι διαθέσιμο αυτή τη στιγμή."
+        r = requests.post(HOSPITAL_API_URL, json={}, timeout=5)
+        return r.json().get("fulfillmentText", "Δεν βρέθηκαν πληροφορίες.")
+    except:
+        return "Σφάλμα API νοσοκομείων."
 
-def get_timologio_fare(distance_km, time="day", wait_minutes=0, heavy_luggage=0, from_airport=False, from_station=False, radio_call=False, appointment=False, zone="zone1"):
-    data = {
-        "distance_km": distance_km,
-        "time": time,
-        "wait_minutes": wait_minutes,
-        "heavy_luggage": heavy_luggage,
-        "from_airport": from_airport,
-        "from_station": from_station,
-        "radio_call": radio_call,
-        "appointment": appointment,
-        "zone": zone
-    }
+def get_distance_fare(orig="Πάτρα", dest="Αθήνα") -> dict:
     try:
-        resp = requests.post(TIMOLOGIO_API_URL, json=data, timeout=5)
-        resp.raise_for_status()
-        d = resp.json()
-        return d.get("total_fare")
-    except Exception as e:
-        print("Timologio API error:", str(e))
-        return None
+        r = requests.post(DISTANCE_API_URL,
+                          json={"origin": orig, "destination": dest},
+                          timeout=8)
+        return r.json()
+    except:
+        return {"error": "Σφάλμα API διαδρομής."}
 
-# --- Formatters ---
-def format_pharmacy_list(data, area):
+# --- Formatters & Flows ---
+def format_pharmacies(data: dict) -> str:
     if "error" in data:
         return data["error"]
-    if not data.get("pharmacies"):
-        return f"Δεν βρέθηκαν εφημερεύοντα φαρμακεία στην {area} για τα κριτήρια που δώσατε."
-    lines = [f"Σήμερα εφημερεύουν τα παρακάτω φαρμακεία στην {area}:"]
-    for p in data["pharmacies"]:
-        lines.append(f"- {p['name']}, {p['address']}, {p['time_range']}")
-    return "\n".join(lines)
+    lst = data.get("pharmacies", [])
+    if not lst:
+        return "Δεν βρέθηκαν εφημερεύοντα φαρμακεία."
+    return "Εφημερεύοντα φαρμακεία:\n" + "\n".join(
+        f"- {p['name']}, {p['address']} ({p['time_range']})" for p in lst
+    )
 
-# --- MAIN CHAT ROUTE ---
+def handle_distance_flow(msg: str, sid: str) -> str:
+    dest = extract_destination(msg)
+    if not dest:
+        SESSIONS[sid] = {"pending": "TripCostIntent"}
+        return "Σε ποιον προορισμό να υπολογίσω απόσταση και κόστος;"
+    res = get_distance_fare("Πάτρα", dest)
+    if "error" in res:
+        return res["error"]
+    km, dur = res.get("distance_km"), res.get("duration")
+    fare, zone = res.get("total_fare"), res.get("zone")
+    txt = (f"Απόσταση Πάτρα→{dest}: {km} χλμ, διάρκεια {dur}, "
+           f"κόστος ~{fare}€ (Ζώνη: {zone}).")
+    if zone == "zone2":
+        txt += "\nΣημείωση: δεν περιλαμβάνονται διόδια/ferry."
+    return txt
+
+# --- Main Chat Endpoint ---
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.get_json()
-    user_message = data.get("message", "")
-    reply = ""
-    try:
-        print("User message:", user_message)
-        intent, areas = detect_intent_and_entities(user_message)
-        print("Intent:", intent, "Areas:", areas)
-        if intent == "distance_fare" and len(areas) >= 2:
-            origin = areas[0]
-            destination = areas[1]
-            dist_data, err = get_distance_fare(origin, destination)
-            if err:
-                reply = err
-            elif dist_data:
-                km = dist_data.get("distance_km")
-                duration = dist_data.get("duration")
-                fare = dist_data.get("total_fare")
-                zone = dist_data.get("zone")
-                txt = f"Απόσταση {origin} προς {destination}: {km} χλμ, διάρκεια {duration}, τιμή {fare}€ (Ζώνη: {zone})."
-                if zone == "zone2":
-                    txt += "\nΣημείωση: Δεν περιλαμβάνονται πιθανά διόδια και ναύλοι."
-                reply = txt
-        elif intent == "pharmacy":
-            area = areas[0] if areas else "Πάτρα"
-            pharmacy_data = get_on_duty_pharmacies(area)
-            reply = format_pharmacy_list(pharmacy_data, area)
-        elif intent == "hospital":
-            reply = get_hospital_info()
-        elif intent == "minimum_fare":
-            reply = "Η ελάχιστη αποζημίωση για διαδρομή είναι 4,00€ . Για απλή κλήση ραδιοταξί η ελάχιστη είναι 5,92€."
-        elif intent == "fare_info":
-            reply = ("Τιμολόγιο ταξί Πάτρας:\n"
-                "- Ελάχιστη αποζημίωση: 4,00€\n"
-                "- Πτώση σημαίας: περιλαμβάνεται στην ελάχιστη\n"
-                "- Εντός ζώνης: 0,90€/χλμ\n"
-                "- Εκτός ζώνης ή νυχτερινό: 1,25€/χλμ\n"
-                "- Ραδιοταξί: απλή κλήση 1,92€, ραντεβού 3,39-5,65€\n"
-                "- Αναμονή: 15€/ώρα\n"
-                "- Αποσκευές >10kg: 0,39€/τμχ\n"
-                "- Από/προς αεροδρόμιο: +4,00€, σταθμό: +1,07€")
-        elif intent == "wait_fare":
-            reply = "Η χρέωση αναμονής είναι 15€ ανά ώρα."
-        else:
-            # Default: Περνάει στο OpenAI για FAQ/γενικές πληροφορίες/εκδρομές
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message}
-                ]
+    payload      = request.get_json()
+    user_message = payload.get("message","")
+    session_id   = payload.get("session_id","default_session")
+    app.logger.debug(f"[User] {session_id}: {user_message!r}")
+
+    session = SESSIONS.get(session_id, {})
+
+    # 1) Ολοκλήρωση TripCost flow
+    if session.get("pending") == "TripCostIntent":
+        reply = handle_distance_flow(user_message, session_id)
+        session.pop("pending")
+        SESSIONS[session_id] = session
+        return jsonify({"reply": reply})
+
+    # 2) Ολοκλήρωση Pharmacy-area follow-up
+    if session.get("pending_pharmacy_area"):
+        area = extract_area(user_message)
+        session.pop("pending_pharmacy_area")
+        if not area:
+            return jsonify({"reply":
+                "Δεν αναγνώρισα την περιοχή· δοκίμασε π.χ. Ρίο, Οβρυά/Μεσάτιδα, Βραχνέικα, Παραλία Πατρών."})
+        reply = format_pharmacies(get_on_duty_pharmacies(area))
+        return jsonify({"reply": reply})
+
+    # 3) Ολοκλήρωση Services-follow-up
+    if session.get("pending_services"):
+        sel = normalize_text(user_message)
+        # Καθορισμός απάντησης βάσει επιλογής
+        if "εκδρομ" in sel:
+            reply = (
+                "Οι εκδρομές μας περιλαμβάνουν οργανωμένα πακέτα για Αρχαία Ολυμπία, "
+                "Δελφούς, Ναύπακτο, Γαλάξιδι κ.ά., με έμπειρους οδηγούς και "
+                "ευέλικτο πρόγραμμα."
             )
-            reply = response.choices[0].message.content
-    except Exception as e:
-        print("Exception occurred:", str(e))
-        reply = "Λυπάμαι, υπήρξε τεχνικό πρόβλημα. Προσπαθήστε ξανά αργότερα."
+        elif "τουριστ" in sel:
+            reply = (
+                "Οι τουριστικές μεταφορές καλύπτουν υπηρεσίες πόρτα-πόρτα, "
+                "ξεναγήσεις και VIP πακέτα σε όλη την Ήπειρο."
+            )
+        elif "εταιρ" in sel:
+            reply = (
+                "Οι εταιρικές μεταφορές προσφέρουν "
+                "συμβόλαια, reporting και υπηρεσίες μετακίνησης "
+                "υπαλλήλων/στελεχών."
+            )
+        elif "courier" in sel or "κατοικιδ" in sel:
+            reply = (
+                "Η υπηρεσία Courier & μεταφορά κατοικιδίων "
+                "διασφαλίζει ασφαλή παράδοση δεμάτων και "
+                "φιλική μετακίνηση κατοικιδίων."
+            )
+        elif "night" in sel:
+            reply = (
+                "Το Night Taxi λειτουργεί 00:00–06:00, "
+                "με ειδικές βραδινές τιμές και επιπλέον ασφάλεια."
+            )
+        elif "σχολ" in sel:
+            reply = (
+                "Τα σχολικά δρομολόγια καλύπτουν παραλαβή/παράδοση "
+                "μαθητών με άδεια λειτουργίας & ασφαλιστική κάλυψη."
+            )
+        else:
+            reply = (
+                "Δεν κατάλαβα την επιλογή. Διάλεξε μία από τις εξής κατηγορίες:\n"
+                "- Εκδρομές\n- Τουριστικές μεταφορές\n- Εταιρικές μεταφορές\n"
+                "- Courier & κατοικίδια\n- Night Taxi\n- Σχολικά"
+            )
+        # Καθαρισμός flag
+        session.pop("pending_services")
+        SESSIONS[session_id] = session
+        return jsonify({"reply": reply})
+
+    # 4) Καταχώρηση νέου intent
+    intent = detect_intent(user_message)
+    app.logger.debug(f"[Intent] {session_id}: {intent}")
+
+    # 5) Routing
+    if intent == "OnDutyPharmacyIntent":
+        area = extract_area(user_message)
+        if not area:
+            SESSIONS[session_id] = {"pending_pharmacy_area": True}
+            return jsonify({"reply":
+                "Σε ποια περιοχή της Πάτρας ή γύρω απ’ αυτήν θες εφημερεύοντα φαρμακεία; "
+                "(π.χ. Ρίο, Οβρυά/Μεσάτιδα, Βραχνέικα, Παραλία Πατρών)"})
+        reply = format_pharmacies(get_on_duty_pharmacies(area))
+
+    elif intent == "HospitalIntent":
+        reply = get_hospital_info()
+
+    elif intent == "TripCostIntent":
+        reply = handle_distance_flow(user_message, session_id)
+
+    elif intent == "PricingInfoIntent":
+        nt = normalize_text(user_message)
+        if "αποσκευ" in nt or "βαλιτσ" in nt:
+            reply = "🔔 Χρέωση αποσκευών >10 kg: 0.39 €/τεμάχιο."
+        else:
+            reply = (
+                "🔔 ΤΙΜΟΛΟΓΙΟ ΤΑΞΙ ΠΑΤΡΑΣ\n"
+                "- Ελάχιστη: 4.00€\n"
+                "- 0.90€/χλμ εντός πόλης, 1.25€/χλμ εκτός/βράδυ\n"
+                "- Ραδιοταξί: 1.92€–5.65€\n"
+                "- Αναμονή: 15€/ώρα, +4€ αεροδρόμιο, +1.07€ σταθμός"
+            )
+
+    elif intent == "ContactInfoIntent":
+        reply = (
+            "📞 Taxi Express Πάτρας\n"
+            "- Τηλ.: 2610 450000\n"
+            "- Booking: https://booking.infoxoros.com"
+        )
+
+    elif intent == "ServicesAndToursIntent":
+        # Flag για follow-up
+        SESSIONS[session_id] = {"pending_services": True}
+        reply = (
+            "Με ποιες από τις παρακάτω υπηρεσίες σε ενδιαφέρει να σε βοηθήσω;\n"
+            "- Εκδρομές\n- Τουριστικές μεταφορές\n- Εταιρικές μεταφορές\n"
+            "- Courier & μεταφορά κατοικιδίων\n- Night Taxi\n- Σχολικά"
+        )
+
+    elif intent == "EndConversationIntent":
+        reply = "Ευχαριστούμε πολύ για την επικοινωνία! Καλή συνέχεια και ασφαλείς διαδρομές."
+
+    else:
+        # GPT Fallback
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role":"system", "content": SYSTEM_PROMPT},
+                {"role":"user",   "content": user_message}
+            ]
+        )
+        reply = resp.choices[0].message.content.strip()
+
     return jsonify({"reply": reply})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
