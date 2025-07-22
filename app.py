@@ -24,7 +24,7 @@ DISTANCE_API_URL   = "https://distance-api-160866660933.europe-west1.run.app/cal
 HOSPITAL_API_URL   = "https://patra-hospitals-webhook-160866660933.europe-west1.run.app/"
 TIMOLOGIO_API_URL  = "https://timologio-160866660933.europe-west1.run.app/calculate_fare"
 
-# --- System prompt (keep intact) ---
+# --- System prompt (unchanged) ---
 SYSTEM_PROMPT = """
 Γεια σας! Είμαι ο Mr Booky, ο ψηφιακός βοηθός του Taxi Express Πάτρας (https://taxipatras.com).
 - Άμεση εξυπηρέτηση 24/7 – 365 ημέρες το χρόνο
@@ -58,7 +58,7 @@ NIGHT_RATE     = 1.25   # €/χλμ νυχτερινό
 RADIO_CALL_FEE = 1.92   # €/ραδιοταξί απλή κλήση
 BAGGAGE_RATE   = 0.39   # €/τεμάχιο αποσκευής >10kg
 
-# --- Text normalization ---
+# --- Text normalization helpers ---
 def strip_accents(text: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFD", text)
                    if unicodedata.category(ch) != "Mn")
@@ -66,6 +66,12 @@ def strip_accents(text: str) -> str:
 def normalize_text(text: str) -> str:
     t = strip_accents(text.lower())
     return t.translate(str.maketrans("", "", string.punctuation))
+
+# --- Article stripping regex & function ---
+ARTICLE_RE = re.compile(r'^(?:τον|την|τη|το|ο|η)\s+', re.IGNORECASE)
+
+def strip_article(text: str) -> str:
+    return ARTICLE_RE.sub("", text).strip()
 
 # --- Load NLU intents ---
 def load_intents():
@@ -97,29 +103,29 @@ def extract_area(message: str) -> str | None:
     return best_area if best_score >= 0.5 else None
 
 # --- Intent classification ---
-def fuzzy_intent(message: str) -> str:
-    msg = normalize_text(message)
+def fuzzy_intent(msg: str) -> str:
+    nm = normalize_text(msg)
     best_score, best_intent = 0.0, "default"
     for intent, data in INTENTS.items():
         for ex in data.get("examples", []):
-            score = SequenceMatcher(None, normalize_text(ex), msg).ratio()
+            score = SequenceMatcher(None, normalize_text(ex), nm).ratio()
             if score > best_score:
                 best_score, best_intent = score, intent
     return best_intent if best_score > 0.8 else "default"
 
-def keyword_boosted_intent(message: str) -> str | None:
-    msg = normalize_text(message)
-    if "φαρμακει" in msg:
+def keyword_boosted_intent(msg: str) -> str | None:
+    nm = normalize_text(msg)
+    if "φαρμακει" in nm:
         return "OnDutyPharmacyIntent"
-    if "νοσοκομει" in msg:
+    if "νοσοκομει" in nm:
         return "HospitalIntent"
-    if "αποσκευ" in msg or "βαλιτσ" in msg:
+    if "αποσκευ" in nm or "βαλιτσ" in nm:
         return "PricingInfoIntent"
-    if ("απο" in msg and "μεχρι" in msg) or "κοστιζει" in msg or "χιλιο" in msg or "επιστροφη" in msg:
+    if ("απο" in nm and "μεχρι" in nm) or "κοστιζει" in nm or "χιλιο" in nm or "επιστροφη" in nm:
         return "TripCostIntent"
-    if any(k in msg for k in ("τηλεφων", "τηλ", "site", "booking")):
+    if any(k in nm for k in ("τηλεφων", "τηλ", "site", "booking")):
         return "ContactInfoIntent"
-    if any(b in msg for b in ("ευχαριστ", "αντιο", "bye")):
+    if any(b in nm for b in ("ευχαριστ", "αντιο", "bye")):
         return "EndConversationIntent"
     return None
 
@@ -160,52 +166,56 @@ def get_distance_fare(origin: str, destination: str) -> dict:
 def format_pharmacies(data: dict) -> str:
     if data.get("error"):
         return data["error"]
-    items = data.get("pharmacies", [])
-    if not items:
+    pharmacies = data.get("pharmacies", [])
+    if not pharmacies:
         return "Δεν βρέθηκαν εφημερεύοντα φαρμακεία."
-    lines = [f"- {p['name']}, {p['address']} ({p['time_range']})" for p in items]
-    return "Εφημερεύοντα φαρμακεία:\n" + "\n".join(lines)
+    return "Εφημερεύοντα φαρμακεία:\n" + "\n".join(
+        f"- {p['name']}, {p['address']} ({p['time_range']})" for p in pharmacies
+    )
 
 def handle_trip(msg: str, session_id: str) -> str:
     nm = normalize_text(msg)
     is_return = "επιστροφη" in nm
 
-    # extract origin/destination
-    m = re.search(r"απο\s+(.*?)\s+μεχρι\s+(.*?)(?:\s|$)", nm)
+    # Extract origin & destination
+    m = re.search(r"απο\s+(.*?)\s+μεχρι\s+(.+)", nm)
     if m:
-        orig = m.group(1).title().strip()
-        dest = m.group(2).title().strip()
+        orig_raw = strip_article(m.group(1).title().strip())
+        dest_candidate = m.group(2).strip()
+        dest_candidate = re.split(
+            r'\b(?:ποσο|χιλιο|κόστος|€|κανει|ευρω)\b',
+            dest_candidate, flags=re.IGNORECASE
+        )[0].strip()
+        dest_raw = strip_article(dest_candidate.title()).rstrip(" ?!.,:")
     else:
-        orig, dest = "Πάτρα", None
+        orig_raw, dest_raw = "Πάτρα", None
         for w in reversed(nm.split()):
             if w not in {"απο", "μεχρι", "ως", "για", "εως"}:
-                dest = w.title()
+                dest_raw = strip_article(w.title())
                 break
 
-    if not dest:
+    if not dest_raw:
         SESSIONS[session_id] = {"pending": "TripCostIntent"}
         return "Σε ποιον προορισμό να υπολογίσω απόσταση ή κόστος;"
 
-    res = get_distance_fare(orig, dest)
+    res = get_distance_fare(orig_raw, dest_raw)
     if res.get("error"):
-        return f"Δεν βρέθηκε διαδρομή από {orig} προς {dest}. Δοκίμασε ξανά το όνομα."
+        return f"Δεν βρέθηκε διαδρομή από {orig_raw} προς {dest_raw}. Δοκίμασε ξανά το όνομα."
 
-    # distance only?
     if "χιλιο" in nm:
         km = res.get("distance_km")
-        return f"Η απόσταση από {orig} προς {dest} είναι {km} χιλιόμετρα."
+        return f"Η απόσταση από {orig_raw} προς {dest_raw} είναι {km} χιλιόμετρα."
 
     total = float(res.get("total_fare", 0.0))
     if is_return:
         total *= 2
 
-    # baggage
     bm = re.search(r"(\d+)\s+αποσκευ", nm)
     if bm:
         total += int(bm.group(1)) * BAGGAGE_RATE
 
     total = max(total, MIN_FARE)
-    return f"Το κόστος διαδρομής από {orig} προς {dest} είναι {total:.2f}€ (χωρίς διόδια)."
+    return f"Το κόστος διαδρομής από {orig_raw} προς {dest_raw} είναι {total:.2f}€ (χωρίς διόδια)."
 
 # --- /chat endpoint ---
 @app.route("/chat", methods=["POST"])
@@ -227,7 +237,6 @@ def chat():
         return jsonify({"reply": handle_trip(message, session_id)})
 
     intent = detect_intent(message)
-
     if intent == "OnDutyPharmacyIntent":
         area = extract_area(message)
         if not area:
@@ -257,21 +266,28 @@ def chat():
         reply = "Ευχαριστούμε πολύ που επικοινωνήσατε μαζί μας! Καλή συνέχεια."
 
     else:
-        # GPT fallback with preserved SYSTEM_PROMPT
-        resp = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system",  "content": SYSTEM_PROMPT},
-                {"role": "user",    "content": message}
-            ]
+        resp = requests.post(
+            TIMOLOGIO_API_URL,
+            json={"message": message},
+            timeout=5
         )
-        reply = resp.choices[0].message.content.strip()
+        if resp.ok:
+            data = resp.json()
+            if "fare" in data:
+                reply = f"Το υπολογιζόμενο κόμιστρο είναι {data['fare']:.2f}€."
+            else:
+                reply = resp.text
+        else:
+            r = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": message}
+                ]
+            )
+            reply = r.choices[0].message.content.strip()
 
     return jsonify({"reply": reply})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
