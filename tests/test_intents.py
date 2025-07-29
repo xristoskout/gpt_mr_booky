@@ -14,15 +14,17 @@ def classifier():
 
 def test_keyword_contact(classifier):
     msg = "πώς κατεβάζω το app;"
-    assert classifier.detect(msg) == "ContactInfoIntent"
+    result = classifier.detect(msg)
+    assert result["intent"] == "ContactInfoIntent"
 
 
 def test_keyword_trip_cost(classifier):
     for txt in ["πόσο κοστίζει", "πόσα χλμ", "κόστος διαδρομής"]:
-        intent = classifier.detect(txt)
-        assert intent == "TripCostIntent"
+        result = classifier.detect(txt)
+        assert result["intent"] == "TripCostIntent"
 
 
 def test_fuzzy_pharmacy(classifier):
     msg = "πού είναι φαρμακείο διανυκτερεύων;"
-    assert classifier.detect(msg) == "OnDutyPharmacyIntent"
+    result = classifier.detect(msg)
+    assert result["intent"] == "OnDutyPharmacyIntent"

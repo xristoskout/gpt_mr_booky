@@ -1,4 +1,5 @@
 # main.py
+
 import re
 import logging
 from typing import Dict, Any
@@ -6,9 +7,14 @@ import requests
 import spacy
 spacy.load("en_core_web_sm")
 
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+# === Init Logger ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # === Load ENV / Config ===
 load_dotenv()
@@ -16,15 +22,32 @@ from config import Settings
 from api_clients import build_clients
 from intents import IntentClassifier
 
-# === Init ===
+# === Init App & Settings ===
 settings = Settings()
+
+# Handle CORS origins from ENV
+if settings.cors_origins == "*":
+    origins = ["*"]
+else:
+    origins = [origin.strip() for origin in settings.cors_origins.split(",")]
+
+logger.info(f"CORS Origins Loaded: {origins}")
+
+# === Create FastAPI App ===
+app = FastAPI()
+
+# === Add CORS Middleware ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=(origins != ["*"]),  # Respect CORS rules
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# === Init Clients & Classifier ===
 clients = build_clients(settings)
 classifier = IntentClassifier(settings.intents_path)
-
-# === Init Logger & App ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-app = FastAPI()
 
 # === Models ===
 class ChatRequest(BaseModel):
