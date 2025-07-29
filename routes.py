@@ -196,21 +196,11 @@ def create_chat_blueprint(settings: Settings) -> Blueprint:
             else:
                 orig, dest = "Πάτρα", nm.split()[-1]
             orig, dest = orig.title(), dest.title()
-            route = clients["distance"].route_and_fare(orig, dest)
-            if "error" in route:
-                reply = "Δεν κατάλαβα για ποια διαδρομή ρωτάς."
+            info = clients["timologio"].calculate({"origin": orig, "destination": dest})
+            if "total_fare" in info:
+                reply = f"Η διαδρομή κοστίζει {info['total_fare']:.2f}€."
             else:
-                session["last_route"] = route
-                info = clients["timologio"].calculate(route)
-                if "total_fare" in info:
-                    disc = "" if route["zone"] == "zone1" else " Στην τιμή δεν περιλαμβάνονται διόδια."
-                    reply = (
-                        f"Η διαδρομή κοστίζει {info['total_fare']:.2f}€ "
-                        f"και διαρκεί περίπου {route['duration']}." + disc
-                    )
-                    session["pending"] = "trip_extras"
-                else:
-                    reply = info.get("error", "Σφάλμα υπολογισμού κόστους.")
+                reply = info.get("error", "Σφάλμα υπολογισμού κόστους.")
 
         elif intent == "PricingInfoIntent":
             reply = (

@@ -2,7 +2,7 @@ import json
 import logging
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from nlp_utils import extract_entities, normalize_text
 
 logger = logging.getLogger(__name__)
@@ -16,20 +16,19 @@ class IntentConfig:
 
 
 class IntentClassifier:
-    def __init__(self, fuzzy_threshold: float = 0.8) -> None:
+    def __init__(self, intents_path: Path = INTENTS_FILE, fuzzy_threshold: float = 0.8) -> None:
         self.fuzzy_threshold = fuzzy_threshold
         self.intents: Dict[str, IntentConfig] = {}
 
-        # ✅ Φορτώνει το intents.json σωστά
-        if not INTENTS_FILE.exists():
-            logger.error(f"❌ Το αρχείο {INTENTS_FILE} δεν βρέθηκε.")
-            raise FileNotFoundError(f"{INTENTS_FILE} not found")
+        path = Path(intents_path)
 
-        with open(INTENTS_FILE, "r", encoding="utf-8") as f:
+        if not path.exists():
+            logger.error(f"❌ Το αρχείο {path} δεν βρέθηκε.")
+            raise FileNotFoundError(f"{path} not found")
+
+        with open(path, "r", encoding="utf-8") as f:
             intent_data = json.load(f)
-            self.intents = {
-                name: IntentConfig(cfg) for name, cfg in intent_data.items()
-            }
+            self.intents = {name: IntentConfig(cfg) for name, cfg in intent_data.items()}
 
         logger.info(f"✅ Loaded {len(self.intents)} intents")
 
@@ -45,10 +44,10 @@ class IntentClassifier:
         if any(k in nm for k in ("νοσοκομει", "εφημερε", "εφημερευον")):
             return "HospitalIntent"
 
-        if any(k in nm for k in ("ποσο", "κοστος", "χρεωση", "τιμη", "χιλ", "χιλιομετρα", "μεχρι", "απο", "εως", "ως", "διαδρομη", "αποσταση", "δρομολογιο", "ποια ειναι η αποσταση")):
+        if any(k in nm for k in ("ποσο", "κοστος", "χρεωση", "τιμη", "χιλ", "χιλιομετρα", "χλμ", "μεχρι", "απο", "εως", "ως", "διαδρομη", "αποσταση", "δρομολογιο", "ποια ειναι η αποσταση")):
             return "TripCostIntent"
 
-        if any(k in nm for k in ("κρατηση", "booking", "τηλεφωνο", "email", "επικοινωνια", "εφαρμογη")):
+        if any(k in nm for k in ("κρατηση", "booking", "τηλεφωνο", "email", "επικοινωνια", "εφαρμογη", "app")):
             return "ContactInfoIntent"
 
         if any(k in nm for k in ("εκδρομη", "τουρ", "προορισμος", "ναυπακτος", "πακετο", "οδηγος")):

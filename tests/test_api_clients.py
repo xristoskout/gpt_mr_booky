@@ -3,8 +3,9 @@
 import pytest
 import requests
 from api_clients import (
-    PharmacyClient, DistanceClient,
-    HospitalClient, TimologioClient
+    PharmacyClient,
+    HospitalClient,
+    TimologioClient,
 )
 
 
@@ -21,27 +22,6 @@ def test_pharmacy_error(requests_mock):
     client = PharmacyClient(url)
     requests_mock.get(url, exc=requests.exceptions.ConnectTimeout)
     data = client.get_on_duty("Πάτρα")
-    assert "error" in data
-
-
-def test_distance_success(requests_mock):
-    url = "http://api/distance"
-    client = DistanceClient(url)
-    requests_mock.post(url, json={
-        "distance_km": 12.34,
-        "total_fare": 56.78,
-        "time": "day"
-    })
-    data = client.route_and_fare(origin="A", destination="B")
-    assert data["distance_km"] == 12.34
-    assert data["total_fare"] == 56.78
-
-
-def test_distance_error(requests_mock):
-    url = "http://api/distance"
-    client = DistanceClient(url)
-    requests_mock.post(url, status_code=500)
-    data = client.route_and_fare(origin="A", destination="B")
     assert "error" in data
 
 

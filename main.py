@@ -6,7 +6,7 @@ import requests
 import spacy
 spacy.load("en_core_web_sm")
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -15,7 +15,6 @@ load_dotenv()
 from config import Settings
 from api_clients import build_clients
 from intents import IntentClassifier
-from entity_parser import extract_entities
 
 # === Init ===
 settings = Settings()
@@ -67,10 +66,10 @@ async def chat_endpoint(request: Request):
         return info or {"response": "ℹ Δεν βρέθηκαν σχετικές πληροφορίες για Πάτρα."}
 
     elif intent == "OnDutyPharmacyIntent":
-        return clients["pharmacy"]._get()
+        return clients["pharmacy"].get_on_duty()
 
     elif intent == "HospitalIntent":
-        return clients["hospital"]._post()
+        return clients["hospital"].info()
 
     elif intent == "TripCostIntent":
         origin = entities.get("FROM")
@@ -83,7 +82,7 @@ async def chat_endpoint(request: Request):
             destination = fallback_entities.get("TO")
 
         if destination:
-            return clients["timologio"]._post({"origin": origin, "destination": destination})
+            return clients["timologio"].calculate({"origin": origin, "destination": destination})
         else:
             return {"response": "❓ Δεν κατάλαβα τον προορισμό. Πού θέλεις να πας;"}
 
@@ -116,7 +115,7 @@ def root():
 
 @app.get("/healthz")
 def healthz():
-    return "OK"
+    return Response("OK", media_type="text/plain")
 
 
 def create_app():
