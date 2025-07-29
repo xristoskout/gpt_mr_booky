@@ -10,3 +10,5 @@ __pycache__/
 .vscode/
 *.sqlite3
 instance/
+.mypy_cache/
+.pytest_cache/

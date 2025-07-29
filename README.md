@@ -1,1 +1,0 @@
-# gpt_mr_booky

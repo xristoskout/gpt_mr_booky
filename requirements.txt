@@ -1,6 +1,11 @@
-Flask
+fastapi
+uvicorn[standard]
 requests
-openai
-python-dotenv
-flask-cors
 gunicorn
+openai>=0.27.0
+pydantic>=2.0
+pydantic-settings>=0.1
+python-dotenv
+spacy
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+
