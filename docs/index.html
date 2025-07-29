@@ -107,127 +107,157 @@
   <audio id="botSound" src="https://raw.githubusercontent.com/xristoskout/Mr-bookie/main/wet-431.mp3" preload="auto"></audio>
 
   <script>
-  const chatbox = document.getElementById("chatbox");
-  const toggleBtn = document.querySelector(".toggle-chatbox");
-  const chatMessages = document.getElementById("chat-messages");
-  const userInput = document.getElementById("user-input");
-  const botSound = document.getElementById("botSound");
+const chatbox = document.getElementById("chatbox");
+const toggleBtn = document.querySelector(".toggle-chatbox");
+const chatMessages = document.getElementById("chat-messages");
+const userInput = document.getElementById("user-input");
+const botSound = document.getElementById("botSound");
 
-  let session_id = localStorage.getItem("chat_session_id");
-  if (!session_id) {
-    session_id = "sess-" + Date.now();
-    localStorage.setItem("chat_session_id", session_id);
-  }
+let session_id = localStorage.getItem("chat_session_id");
+if (!session_id) {
+  session_id = "sess-" + Date.now();
+  localStorage.setItem("chat_session_id", session_id);
+}
 
-  let chatOpened = false;
+let chatOpened = false;
 
-  function autoLinkify(text) {
-    const safeText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const linkRegex = /((https?:\/\/[^\s<>()]+)|(tel:\+?\d+)|(mailto:([^\s<>()]+))|(www\.[^\s<>()]+)|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}))/g;
-    return safeText.replace(linkRegex, (match, p1, p2, p3, p4, mailTarget, p6, emailOnly) => {
-      let cleanMatch = match.replace(/[.,?!;]+$/, "");
-      let url = cleanMatch;
-      let label = cleanMatch;
-      let icon = "🔗";
-      if (cleanMatch.startsWith("www.")) {
-        url = "https://" + cleanMatch; icon = "🌐";
-      }
-      if (cleanMatch.startsWith("tel:")) {
-        icon = "📞"; label = cleanMatch.replace("tel:", "");
-      }
-      if (cleanMatch.startsWith("mailto:")) {
-        icon = "📧"; label = cleanMatch.replace("mailto:", "");
-      }
-      if (emailOnly) {
-        icon = "📧"; url = "mailto:" + emailOnly; label = emailOnly;
-      }
-      let html = `<a href="${url}" target="_blank" style="color:#2563eb;text-decoration:underline;">${icon} ${label}</a>`;
-      if (cleanMatch.includes("booking.infoxoros.com")) {
-        html += `<br><img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(url)}&size=100x100" alt="QR Code" style="margin-top:6px;border-radius:8px;" />`;
-      }
-      return html;
-    });
-  }
-
-  function appendMessage(content, sender) {
-    const message = document.createElement("div");
-    message.classList.add("message", sender);
-
-    const bubble = document.createElement("span");
-    bubble.innerHTML = autoLinkify(content);
-    message.appendChild(bubble);
-    chatMessages.appendChild(message);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-
-    if (sender === "bot") botSound.play().catch(() => {});
-  }
-
-  function clearChat() {
-    chatMessages.innerHTML = '';
-    localStorage.removeItem("chat_session_id");
-    session_id = "sess-" + Date.now();
-    localStorage.setItem("chat_session_id", session_id);
-    appendMessage("Η συνομιλία μηδενίστηκε. Ξεκινάμε από την αρχή.", "bot");
-  }
-
-  async function sendMessage() {
-    const text = userInput.value.trim();
-    if (text === "") return;
-    appendMessage(text, "user");
-    userInput.value = "";
-
-    const typing = document.createElement("div");
-    typing.classList.add("message", "bot");
-    const typingSpan = document.createElement("span");
-    typingSpan.textContent = "Ο Mr Booky γράφει...";
-    typing.appendChild(typingSpan);
-    chatMessages.appendChild(typing);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-
-    try {
-      const response = await fetch("https://mr-booky-backend-160866660933.europe-west1.run.app/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, session_id })
-      });
-
-      typing.remove();
-      const data = await response.json();
-      if (data.reply) {
-        appendMessage(data.reply, "bot");
-      } else {
-        appendMessage("Λάβαμε μη αναμενόμενη απάντηση από τον server.", "bot");
-      }
-    } catch (error) {
-      typing.remove();
-      appendMessage("Προέκυψε σφάλμα. Προσπαθήστε ξανά.", "bot");
+function autoLinkify(text) {
+  const safeText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const linkRegex = /((https?:\/\/[^\s<>()]+)|(tel:\+?\d+)|(mailto:([^\s<>()]+))|(www\.[^\s<>()]+)|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}))/g;
+  return safeText.replace(linkRegex, (match, p1, p2, p3, p4, mailTarget, p6, emailOnly) => {
+    let cleanMatch = match.replace(/[.,?!;]+$/, "");
+    let url = cleanMatch;
+    let label = cleanMatch;
+    let icon = "🔗";
+    if (cleanMatch.startsWith("www.")) {
+      url = "https://" + cleanMatch; icon = "🌐";
     }
-  }
+    if (cleanMatch.startsWith("tel:")) {
+      icon = "📞"; label = cleanMatch.replace("tel:", "");
+    }
+    if (cleanMatch.startsWith("mailto:")) {
+      icon = "📧"; label = cleanMatch.replace("mailto:", "");
+    }
+    if (emailOnly) {
+      icon = "📧"; url = "mailto:" + emailOnly; label = emailOnly;
+    }
+    let html = `<a href="${url}" target="_blank" style="color:#2563eb;text-decoration:underline;">${icon} ${label}</a>`;
+    if (cleanMatch.includes("booking.infoxoros.com")) {
+      html += `<br><img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(url)}&size=100x100" alt="QR Code" style="margin-top:6px;border-radius:8px;" />`;
+    }
+    return html;
+  });
+}
 
-  document.addEventListener("DOMContentLoaded", () => {
-    const closeBtn = document.querySelector(".close-chat-btn");
-    toggleBtn.style.display = "inline-block";
-    chatbox.classList.remove("show");
-    toggleBtn.addEventListener("click", () => {
-      chatbox.classList.add("show");
-      toggleBtn.style.display = "none";
-      if (!chatOpened) {
-        appendMessage("Καλώς ήρθατε! Είμαι ο Mr Booky. Τι μπορώ να κάνω για εσάς;", "bot");
-        chatOpened = true;
-      }
+function appendMessage(content, sender) {
+  const message = document.createElement("div");
+  message.classList.add("message", sender);
+
+  const bubble = document.createElement("span");
+  bubble.innerHTML = autoLinkify(content);
+  message.appendChild(bubble);
+  chatMessages.appendChild(message);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  if (sender === "bot") botSound.play().catch(() => {});
+}
+
+function appendMapLink(url) {
+  const message = document.createElement("div");
+  message.classList.add("message", "bot");
+
+  const button = document.createElement("a");
+  button.href = url;
+  button.target = "_blank";
+  button.rel = "noopener noreferrer";
+  button.innerHTML = `<button style="
+    margin-top: 0.5rem;
+    padding: 10px 18px;
+    background-color: #16a34a;
+    color: white;
+    border: none;
+    border-radius: 1rem;
+    font-size: 0.95rem;
+    cursor: pointer;
+  ">📍 Δες τη διαδρομή στον χάρτη</button>`;
+
+  message.appendChild(button);
+  chatMessages.appendChild(message);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function clearChat() {
+  chatMessages.innerHTML = '';
+  localStorage.removeItem("chat_session_id");
+  session_id = "sess-" + Date.now();
+  localStorage.setItem("chat_session_id", session_id);
+  appendMessage("Η συνομιλία μηδενίστηκε. Ξεκινάμε από την αρχή.", "bot");
+}
+
+async function sendMessage() {
+  const text = userInput.value.trim();
+  if (text === "") return;
+  appendMessage(text, "user");
+  userInput.value = "";
+
+  const typing = document.createElement("div");
+  typing.classList.add("message", "bot");
+  const typingSpan = document.createElement("span");
+  typingSpan.textContent = "Ο Mr Booky γράφει...";
+  typing.appendChild(typingSpan);
+  chatMessages.appendChild(typing);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  try {
+    const response = await fetch("https://mr-booky-backend-160866660933.europe-west1.run.app/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, session_id })
     });
-    if (closeBtn) {
-      closeBtn.addEventListener("click", () => {
-        chatbox.classList.remove("show");
-        toggleBtn.style.display = "inline-block";
-      });
-      closeBtn.addEventListener("touchstart", (e) => {
-        e.preventDefault();
-        chatbox.classList.remove("show");
-        toggleBtn.style.display = "inline-block";
-      });
+
+    typing.remove();
+    const data = await response.json();
+    if (data.reply) {
+      appendMessage(data.reply, "bot");
+
+      // 👉 Αν υπάρχει URL για χάρτη, εμφάνιση κουμπιού
+      if (data.map_url) {
+        appendMapLink(data.map_url);
+      }
+
+    } else {
+      appendMessage("Λάβαμε μη αναμενόμενη απάντηση από τον server.", "bot");
+    }
+  } catch (error) {
+    typing.remove();
+    appendMessage("Προέκυψε σφάλμα. Προσπαθήστε ξανά.", "bot");
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const closeBtn = document.querySelector(".close-chat-btn");
+  toggleBtn.style.display = "inline-block";
+  chatbox.classList.remove("show");
+  toggleBtn.addEventListener("click", () => {
+    chatbox.classList.add("show");
+    toggleBtn.style.display = "none";
+    if (!chatOpened) {
+      appendMessage("Καλώς ήρθατε! Είμαι ο Mr Booky. Τι μπορώ να κάνω για εσάς;", "bot");
+      chatOpened = true;
     }
   });
-  </script>
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      chatbox.classList.remove("show");
+      toggleBtn.style.display = "inline-block";
+    });
+    closeBtn.addEventListener("touchstart", (e) => {
+      e.preventDefault();
+      chatbox.classList.remove("show");
+      toggleBtn.style.display = "inline-block";
+    });
+  }
+});
+</script>
 </body>
 </html>
