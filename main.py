@@ -113,3 +113,12 @@ def chat_with_openai(chat: ChatRequest):
 @app.get("/")
 def root():
     return {"status": "ok"}
+
+@app.get("/healthz")
+def healthz():
+    return "OK"
+
+
+def create_app():
+    """Return the FastAPI application instance."""
+    return app
