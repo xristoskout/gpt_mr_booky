@@ -1,5 +1,6 @@
 import random
 
+# Υπάρχουσες χιουμοριστικές απαντήσεις για κόστη διαδρομών
 def trip_cost_response(price: float, destination: str) -> str:
     templates = [
         f"Για {destination}; Μας κοστίζει μόλις {price:.2f}€ — πιο φτηνά από πίτσα 🍕.",
@@ -17,8 +18,7 @@ def funny_trip_response(from_city, to_city, price):
     ]
     return random.choice(templates)
 
-# Μπορείς να προσθέσεις και άλλα, π.χ. contact/pharmacy responses
-
+# Υπάρχουσα χιουμοριστική απόκριση στοιχείων επικοινωνίας
 def funny_contact_response() -> str:
     return random.choice([
         "📞 Taxi Express Πάτρας: 2610 450 000 · Booking: https://booking.infoxoros.com\n(Και γίναμε πύραυλος 🕊️)",
@@ -33,3 +33,67 @@ def pricing_info_response(min_fare: float, bag_rate: float, wait_rate: float) ->
         f"- Αναμονή: {wait_rate:.2f}€/ώρα\n"
         f"(ή αν θες να το πούμε πιο ποιητικά: «τα ταξί κοστίζουν, όπως και ο χρόνος!»)"
     )
+
+# ── ΝΕΕΣ ΧΙΟΥΜΟΡΙΣΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ ──
+
+def funny_pharmacy_response(pharmacies):
+    """
+    Παράγει χιουμοριστική απάντηση για εφημερεύοντα φαρμακεία.
+    Αν η λίστα είναι άδεια, κάνει ένα αστείο σχόλιο.
+    """
+    if not pharmacies:
+        return "😴 Δεν βρήκαμε ανοιχτά φαρμακεία, μάλλον όλοι κοιμούνται!"
+    lines = [f"💊 {p['name']} ({p['address']}) {p['time_range']}" for p in pharmacies]
+    return (
+        "🩺 Εφημερεύουν τα εξής φαρμακεία:\n" +
+        "\n".join(lines) +
+        "\n🤗 Περαστικά και καλή ανάρρωση!"
+    )
+
+def funny_hospital_response(hospitals, on_call_message: str) -> str:
+    """
+    Παράγει χιουμοριστική απάντηση για νοσοκομεία.
+    Προσθέτει προτροπή για ζώνη ασφαλείας.
+    """
+    if not hospitals:
+        return "🚑 Δεν εντοπίσαμε νοσοκομεία σε εφημερία αυτή τη στιγμή. Ελπίζω να μη το χρειαστείς!"
+    resp = "🏥 Σήμερα εφημερεύουν:\n"
+    for h in hospitals:
+        resp += f"- {h['name']} ({h['address']}, τηλ: {h['phone']})\n"
+    resp += f"🕐 {on_call_message}\n💉 Μην ξεχνάς να φοράς ζώνη ασφαλείας!"
+    return resp
+
+def funny_services_response(summary: str, services: dict, tours: list) -> str:
+    """
+    Παράγει χιουμοριστική απάντηση για τις υπηρεσίες/εκδρομές.
+    """
+    reply = summary + "\n"
+    for val in services.values():
+        reply += f"{val}\n"
+    for tour in tours:
+        reply += (
+            f"{tour['title']} – {tour['price']} – {tour['duration']}\n"
+            f"Περιλαμβάνει: {tour['includes']}\n"
+            f"Δεν περιλαμβάνει: {tour['not_included']}\n"
+        )
+    reply += "🧳 Έτοιμος για μια αξέχαστη περιπέτεια;"
+    return reply.strip()
+
+def funny_patras_response(answer) -> str:
+    """
+    Προσθέτει αστείο επίλογο σε απαντήσεις του Patras LLM Answers.
+    Δέχεται είτε string είτε dict (με κλειδί 'answer' ή 'reply').
+    """
+    if isinstance(answer, dict):
+        answer = answer.get("answer") or answer.get("reply") or str(answer)
+    return answer.strip() + "\n😉 Ελπίζω να σε βοήθησα!"
+
+def funny_default_response() -> str:
+    """
+    Γενική fallback απάντηση με χιούμορ.
+    """
+    return random.choice([
+        "😅 Χμμ… δεν το έπιασα. Μήπως να το ξαναπείς;",
+        "🧐 Δεν κατάλαβα, αλλά είμαι εδώ για να βοηθήσω!",
+        "🤖 Κάτι δεν μου κολλάει. Για προσπάθησε με άλλα λόγια."
+    ])
