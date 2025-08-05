@@ -8,19 +8,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from config import Settings
+from api_clients import build_clients
+from intents import IntentClassifier
+
+# Εισάγουμε τις νέες συναρτήσεις
 from funny_responses import (
     funny_trip_response,
     trip_cost_response,
-    funny_contact_response
+    funny_contact_response,
+    funny_pharmacy_response,
+    funny_hospital_response,
+    funny_services_response,
+    funny_patras_response,
+    funny_default_response,
 )
-
 
 # === Init Logger ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # === Load NLP ===
-# Αν χρησιμοποιείς ελληνικά, ιδανικά θες το el_core_news_sm, αλλιώς συνέχισε με en_core_web_sm
 try:
     spacy.load("el_core_news_sm")
 except Exception:
@@ -28,12 +36,9 @@ except Exception:
 
 # === Load ENV / Config ===
 load_dotenv()
-from config import Settings
-from api_clients import build_clients
-from intents import IntentClassifier
+settings = Settings()
 
 # === Init FastAPI & Settings ===
-settings = Settings()
 app = FastAPI()
 
 # === Handle CORS ===
@@ -81,11 +86,12 @@ def safe_reply(result):
 def simple_location_extractor(text: str):
     """
     Ενισχυμένο extraction για ελληνικά!
-    - Πρώτα βρίσκει full routes: "απο Πάτρα μεχρι Αθήνα"
+    - Πρώτα βρίσκει full routes: "απο Πάτρα μέχρι Αθήνα"
     - Μετά βρίσκει απλά "στην/στο/για/προς Αθήνα"
     - Αν βρει μόνο μια λέξη (π.χ. "Αθήνα") τη θεωρεί προορισμό, με default FROM = Πάτρα
     """
-    pattern = r"απο\s+(?P<from>\w+).*?(?:μεχρι|προς|για|εως)\s+(?P<to>\w+)"
+    # pattern με ονομαστικά groups
+    pattern = r"απο\s+(?P<from>\w+).*?(?:μεχρι|προς|για|εως|μέχρι)\s+(?P<to>\w+)"
     match = re.search(pattern, text.lower())
     if match:
         return {"FROM": match.group("from").capitalize(), "TO": match.group("to").capitalize()}
@@ -115,6 +121,7 @@ async def chat_endpoint(request: Request):
         contact_base = kb.get("contact", {})
         info = contact_base.get("contact", {})
         if info:
+            # αν υπάρχει βάση δεδομένων, επιστρέφουμε τα πλήρη στοιχεία
             return {
                 "reply": (
                     f"🚖 {contact_base.get('organization', 'Taxi Express Πάτρας')}\n"
@@ -129,40 +136,40 @@ async def chat_endpoint(request: Request):
     elif intent == "ServicesAndToursIntent":
         tours = kb.get("services_and_tours", {})
         if tours:
-            reply = tours.get("summary", "")
-            for key, val in tours.get("services", {}).items():
-                reply += f"\n{val}"
-            for tour in tours.get("tours", []):
-                reply += f"\n{tour['title']} – {tour['price']} – {tour['duration']}\nΠεριλαμβάνει: {tour['includes']}\nΔεν περιλαμβάνει: {tour['not_included']}"
-            return {"reply": reply.strip()}
+            return {"reply": funny_services_response(
+                tours.get("summary", ""),
+                tours.get("services", {}),
+                tours.get("tours", []),
+            )}
 
     elif intent == "PatrasLlmAnswersIntent":
         try:
-            return safe_reply(clients["patras-llm-answers"].answer(user_message))
+            resp = clients["patras-llm-answers"].answer(user_message)
+            return {"reply": funny_patras_response(resp)}
         except Exception as e:
             logger.error(f"Patras LLM Answers client error: {e}")
             return {"reply": "❌ Σφάλμα αναζήτησης πληροφοριών."}
 
     elif intent == "OnDutyPharmacyIntent":
-        area = entities.get("AREA", "Πάτρα")  # Βγάζει την περιοχή ή Πάτρα αν δεν υπάρχει
+        area = entities.get("AREA", "Πάτρα")
         try:
             response = clients["pharmacy"].get_on_duty(area=area, method="get")
             pharmacies = response.get("pharmacies", [])
-            if pharmacies:
-                return {
-                    "reply": "\n".join(
-                        [f"💊 {p['name']} ({p['address']}) {p['time_range']}" for p in pharmacies]
-                    )
-                }
-            else:
-                return {"reply": f"❌ Δεν βρέθηκαν εφημερεύοντα φαρμακεία στην περιοχή {area}."}
+            return {"reply": funny_pharmacy_response(pharmacies)}
         except Exception as e:
             logger.error(f"Pharmacy client error: {e}")
             return {"reply": "❌ Σφάλμα συστήματος φαρμακείων."}
 
     elif intent == "HospitalIntent":
         try:
-            return safe_reply(clients["hospital"].info())
+            resp = clients["hospital"].info()
+            # αν η απάντηση είναι string, προσθέτουμε απλώς χιουμοριστικό επίλογο
+            if isinstance(resp, str):
+                return {"reply": resp + "\n💉 Μην ξεχνάς να φοράς ζώνη ασφαλείας!"}
+            # αν επιστραφεί δομημένο dict:
+            hospitals = resp.get("hospitals", [])
+            on_call_msg = resp.get("on_call_message", "")
+            return {"reply": funny_hospital_response(hospitals, on_call_msg)}
         except Exception as e:
             logger.error(f"Hospital client error: {e}")
             return {"reply": "❌ Σφάλμα στο σύστημα νοσοκομείων."}
@@ -183,19 +190,27 @@ async def chat_endpoint(request: Request):
             travel_kb = kb.get("travel_costs", {})
             cost_info = travel_kb.get(destination.lower())
             if cost_info:
-                return {
-                    "reply": funny_trip_response(origin, destination, cost_info['cost'])
-                }
+                # χρησιμοποιούμε το χιουμοριστικό trip_response
+                return {"reply": funny_trip_response(origin, destination, cost_info['cost'])}
             else:
                 try:
                     result = clients["timologio"].calculate({"origin": origin, "destination": destination})
-                    return safe_reply(result)
+                    # αν το API μας επιστρέψει το κόστος, το περνάμε στη χιουμοριστική απόκριση
+                    price = None
+                    for key in ("total_fare", "total_cost", "fare"):
+                        if key in result:
+                            price = result[key]
+                            break
+                    if price is not None:
+                        return {"reply": funny_trip_response(origin, destination, price)}
+                    return {"reply": funny_patras_response(result)}
                 except Exception as e:
                     logger.error(f"TripCost client error: {e}")
                     return {"reply": "❌ Σφάλμα υπολογισμού κόστους."}
         return {"reply": "❓ Δεν κατάλαβα τον προορισμό. Πού θέλεις να πας;"}
 
-    return {"reply": "🤖 Δεν κατάλαβα ακριβώς. Θες να το ξαναπείς;"}
+    # Αν δεν αναγνωρίστηκε καμία πρόθεση
+    return {"reply": funny_default_response()}
 
 # === Optional OpenAI fallback ===
 @app.post("/openai")
