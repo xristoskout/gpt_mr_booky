@@ -16,7 +16,7 @@ class PharmacyClient:
         self.timeout = timeout
         self._session = requests.Session()
 
-    def get_on_duty(self, area: str = "Πάτρα") -> Dict[str, Any]:
+    def get_on_duty(self, area: str = "Πάτρα"):
         try:
             resp = self._session.get(
                 f"{self.base_url}/pharmacy",
@@ -24,9 +24,11 @@ class PharmacyClient:
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            logger.info(f"Pharmacy API area={area} → {data}")
+            return data
         except requests.RequestException as e:
-            # εδώ θα κάνεις logging αν θέλεις
+            logger.error(f"Pharmacy API error: {e}")
             return {
                 "error": "Το σύστημα εφημερευόντων φαρμακείων δεν είναι διαθέσιμο αυτή τη στιγμή."
             }
