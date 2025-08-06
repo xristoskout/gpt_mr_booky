@@ -174,7 +174,9 @@ async def chat_endpoint(request: Request):
             slot_to_fill = last_missing[0]
 
             # Κάνε extraction από το user_message για να βρεις πιθανό slot value (π.χ. "πάτρα τυρναβος")
-            extracted = extract_entities(user_message)
+            raw_extracted = extract_entities(user_message)
+            slot_map = {"FROM": "origin", "TO": "destination"}
+            extracted = {slot_map.get(k, k): v for k, v in raw_extracted.items()}
             logger.info(f"[CONTEXT PATCH] Extracted entities: {extracted}")
 
             value = extracted.get(slot_to_fill) or user_message
@@ -187,6 +189,8 @@ async def chat_endpoint(request: Request):
             intent = last_intent
             for k, v in extracted.items():
                 entities[k] = v
+            # Επανυπολόγισε τα slots που λείπουν μετά το mapping
+            missing = sess_mgr.get_missing_slots(user_id, last_intent)
 
             logger.info(
                 f"[CONTEXT PATCH]: Used '{value}' as slot value for {slot_to_fill} from '{user_message}'"
@@ -198,7 +202,9 @@ async def chat_endpoint(request: Request):
 
         # 4. Αν λείπουν ακόμα slots, δοκίμασε ξανά extraction για να καλύψεις πολλά slots με μία απάντηση
         if missing:
-            extracted = extract_entities(user_message)
+            raw_extracted = extract_entities(user_message)
+            slot_map = {"FROM": "origin", "TO": "destination"}
+            extracted = {slot_map.get(k, k): v for k, v in raw_extracted.items()}
             logger.info(f"[SLOT-FILLING] Trying extraction for missing slots: {extracted}")
 
             for slot in missing:
