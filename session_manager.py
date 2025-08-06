@@ -64,6 +64,11 @@ class SessionManager:
         sess = self.get_session(user_id)
         return sess['slots'].get(intent, {})
 
+    def clear_slots(self, user_id, intent):
+        sess = self.get_session(user_id)
+        if intent in sess['slots']:
+            del sess['slots'][intent]
+
     def add_history(self, user_id, intent, user_msg, bot_msg):
         sess = self.get_session(user_id)
         sess['history'].append({

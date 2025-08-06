@@ -303,6 +303,7 @@ async def chat_endpoint(request: Request):
                 )
 
                 sess_mgr.add_history(user_id, intent, user_message, reply)
+                sess_mgr.clear_slots(user_id, intent)
                 sess_mgr.set_active_intent(user_id, None)
                 return {
                     "reply": reply,
