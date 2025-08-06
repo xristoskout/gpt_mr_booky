@@ -240,6 +240,8 @@ async def chat_endpoint(request: Request):
         # 8. INTENT LOGIC (π.χ. TripCostIntent)
         if intent == "TripCostIntent":
             # Try get from slots/entities as before
+            slots = sess_mgr.get_active_slots(user_id, intent)
+
             origin = (
                 entities.get("FROM")
                 or entities.get("origin")
