@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, Optional
@@ -8,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 INTENTS_FILE = Path("intents.json")
 
-# Λίστα περιοχών για την αναγνώριση (μπορείς να προσθέσεις περισσότερες)
+# ---- Περιοχές για φαρμακείο, προσάρμοσέ το αν θες ----
 AREAS = [
     "Πάτρα", "Παραλία Πατρών", "Βραχνέικα", "Ρίο", "Μεσσάτιδα"
 ]
@@ -31,11 +32,63 @@ def extract_area(text: str) -> Optional[str]:
                 return area
     return None
 
-def extract_entities(text: str) -> Dict[str, str]:
+# ---- ΒΑΣΙΚΗ & ΕΥΦΥΗΣ ΑΝΑΓΝΩΡΙΣΗ entities ----
+def extract_entities(text: str, context_slot=None):
+    text = text.strip().lower()
     entities = {}
+
+    # 1. "από XXX για YYY" ή "από XXX μέχρι YYY"
+    m = re.search(r"απ[οό]\s+([\wάέίήύόώϊϋΐΰ\s\-]+)\s+(?:μέχρι|για|προς|έως|εως|ως)\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    if m:
+        entities["FROM"] = m.group(1).strip().capitalize()
+        entities["TO"] = m.group(2).strip().capitalize()
+        return entities
+
+    # 2. "XXX YYY" (δυο λέξεις, π.χ. "πάτρα αθήνα")
+    m = re.match(r"^([\wάέίήύόώϊϋΐΰ\-]+)\s+([\wάέίήύόώϊϋΐΰ\-]+)$", text)
+    if m:
+        entities["FROM"] = m.group(1).strip().capitalize()
+        entities["TO"] = m.group(2).strip().capitalize()
+        return entities
+
+    # 3. "για YYY" / "μέχρι YYY"
+    m = re.search(r"(?:για|μέχρι|προς|έως|ως|εως)\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    if m:
+        entities["TO"] = m.group(1).strip().capitalize()
+        if context_slot == "FROM":
+            entities["FROM"] = None
+        return entities
+
+    # 4. "από XXX"
+    m = re.search(r"απ[οό]\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    if m:
+        entities["FROM"] = m.group(1).strip().capitalize()
+        if context_slot == "TO":
+            entities["TO"] = None
+        return entities
+
+    # 5. Φαρμακείο/νοσοκομείο + περιοχή
+    m = re.search(r"(φαρμακειο|φαρμακείο|νοσοκομ[ειοίαή])\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    if m:
+        entities["area"] = m.group(2).strip().capitalize()
+        return entities
+
+    # 6. Πιάσε φαρμακείο περιοχή από λίστα
     area = extract_area(text)
     if area:
-        entities["AREA"] = area
+        entities["area"] = area
+
+    # 7. Μια λέξη (μόνο προορισμός ή περιοχή)
+    words = text.split()
+    if len(words) == 1 and 2 < len(words[0]) < 24:
+        if context_slot == "TO":
+            entities["TO"] = words[0].capitalize()
+        elif context_slot == "FROM":
+            entities["FROM"] = words[0].capitalize()
+        else:
+            entities["TO"] = words[0].capitalize()
+        return entities
+
     return entities
 
 
@@ -83,7 +136,6 @@ class IntentClassifier:
             return "ServicesAndToursIntent"
 
         return None
-
 
     def fuzzy_intent(self, message: str) -> str:
         nm = message.lower()
