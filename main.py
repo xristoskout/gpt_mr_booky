@@ -223,6 +223,7 @@ async def chat_endpoint(request: Request):
                     confirm_text = f"Να σας πω τα εφημερεύοντα νοσοκομεία; 🏥"
                 else:
                     confirm_text = f"Να προχωρήσω με τα στοιχεία που μου δώσατε; 😇"
+                sess_mgr.set_active_intent(user_id, intent)    
                 sess_mgr.add_history(user_id, intent, user_message, confirm_text)
                 return {"reply": confirm_text, "ask_confirm": True, "session": sess_mgr.get_session(user_id)}
 

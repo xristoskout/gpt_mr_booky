@@ -94,9 +94,7 @@ class SessionManager:
 
     def get_last_intent(self, user_id):
         sess = self.get_session(user_id)
-        if sess['history']:
-            return sess['history'][-1]['intent']
-        return sess.get('active_intent', None)
+        return sess.get('active_intent')
 
 FALLBACK_PROMPTS = [
     "Συγγνώμη, δεν το κατάλαβα. Θέλετε να το ξαναδιατυπώσετε;",
