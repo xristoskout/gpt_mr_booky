@@ -145,17 +145,28 @@ async def chat_endpoint(request: Request):
             sess_mgr.get_missing_slots(user_id, last_intent) if last_intent else []
         )
 
-        result = classifier.detect(
-            user_message, active_intent=last_intent, missing_slots=last_missing
-        )
-        intent = result.get("intent")
-        entities = result.get("entities", {})
+        normalized = user_message.strip().lower()
+        if normalized in {"ναι"}:
+            body["confirmed"] = True
+            intent = last_intent
+            entities = {}
+        elif normalized in {"όχι", "οχι"}:
+            body["confirmed"] = False
+            intent = last_intent
+            entities = {}
+        else:
+            result = classifier.detect(
+                user_message, active_intent=last_intent, missing_slots=last_missing
+            )
+            intent = result.get("intent")
+            entities = result.get("entities", {})
 
         logger.info(f"[INTENT]: {intent}, [ENTITIES]: {entities}")
 
         # 2. Slot-filling context patch: αν intent=default, unfinished last_intent, και κοντή απάντηση
+        short_reply = len(user_message.strip().split()) <= 2
 
-        if intent == "default" and last_intent and last_missing:
+        if last_intent and last_missing and (intent == "default" or short_reply):
             slot_to_fill = last_missing[0]
 
             # Κάνε extraction από το user_message για να βρεις πιθανό slot value (π.χ. "πάτρα τυρναβος")
@@ -170,11 +181,12 @@ async def chat_endpoint(request: Request):
                 if k != slot_to_fill:
                     sess_mgr.update_slot(user_id, last_intent, k, v)
             intent = last_intent
-            # Merge όλα τα extracted στο entities
             for k, v in extracted.items():
                 entities[k] = v
 
-            logger.info(f"[CONTEXT PATCH]: Used '{value}' as slot value for {slot_to_fill} from '{user_message}'")
+            logger.info(
+                f"[CONTEXT PATCH]: Used '{value}' as slot value for {slot_to_fill} from '{user_message}'"
+            )
 
         # 3. Πάρε slots για το (σωστό!) intent
         slots = sess_mgr.get_active_slots(user_id, intent)
