@@ -146,6 +146,7 @@ async def chat_endpoint(request: Request):
         )
 
         normalized = user_message.strip().lower()
+        is_short = len(user_message.strip().split()) <= 3 or len(user_message.strip()) < 20
         if normalized in {"ναι"}:
             body["confirmed"] = True
             intent = last_intent
@@ -154,6 +155,9 @@ async def chat_endpoint(request: Request):
             body["confirmed"] = False
             intent = last_intent
             entities = {}
+        elif last_intent and last_missing and is_short:
+            intent = last_intent
+            entities = {}    
         else:
             result = classifier.detect(
                 user_message, active_intent=last_intent, missing_slots=last_missing
@@ -164,7 +168,7 @@ async def chat_endpoint(request: Request):
         logger.info(f"[INTENT]: {intent}, [ENTITIES]: {entities}")
 
         # 2. Slot-filling context patch: αν intent=default, unfinished last_intent, και κοντή απάντηση
-        short_reply = len(user_message.strip().split()) <= 2
+        short_reply = is_short
 
         if last_intent and last_missing and (intent == "default" or short_reply):
             slot_to_fill = last_missing[0]
