@@ -38,23 +38,29 @@ def extract_entities(text: str, context_slot=None):
     entities = {}
 
     # 1. "από XXX για YYY" ή "από XXX μέχρι YYY"
-    m = re.search(r"απ[οό]\s+([\wάέίήύόώϊϋΐΰ\s\-]+)\s+(?:μέχρι|για|προς|έως|εως|ως)\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    m = re.search(
+        r"απ[οό]\s+([\wάέίήύόώϊϋΐΰ\s\-]+)\s+(?:μέχρι|μεχρι|για|προς|έως|εως|ως)\s+([\wάέίήύόώϊϋΐΰ\s\-]+)",
+        text,
+    )
     if m:
-        entities["FROM"] = m.group(1).strip().capitalize()
-        entities["TO"] = m.group(2).strip().capitalize()
+        entities["FROM"] = m.group(1).strip().title()
+        entities["TO"] = m.group(2).strip().title()
         return entities
 
     # 2. "XXX YYY" (δυο λέξεις, π.χ. "πάτρα αθήνα")
     m = re.match(r"^([\wάέίήύόώϊϋΐΰ\-]+)\s+([\wάέίήύόώϊϋΐΰ\-]+)$", text)
     if m:
-        entities["FROM"] = m.group(1).strip().capitalize()
-        entities["TO"] = m.group(2).strip().capitalize()
+        entities["FROM"] = m.group(1).strip().title()
+        entities["TO"] = m.group(2).strip().title()
         return entities
 
     # 3. "για YYY" / "μέχρι YYY"
-    m = re.search(r"(?:για|μέχρι|προς|έως|ως|εως)\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    m = re.search(
+        r"(?:για|μέχρι|μεχρι|προς|έως|εως|ως)\s+([\wάέίήύόώϊϋΐΰ\s\-]+)",
+        text,
+    )
     if m:
-        entities["TO"] = m.group(1).strip().capitalize()
+        entities["TO"] = m.group(1).strip().title()
         if context_slot == "FROM":
             entities["FROM"] = None
         return entities
@@ -62,15 +68,17 @@ def extract_entities(text: str, context_slot=None):
     # 4. "από XXX"
     m = re.search(r"απ[οό]\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
     if m:
-        entities["FROM"] = m.group(1).strip().capitalize()
+        entities["FROM"] = m.group(1).strip().title()
         if context_slot == "TO":
             entities["TO"] = None
         return entities
 
     # 5. Φαρμακείο/νοσοκομείο + περιοχή
-    m = re.search(r"(φαρμακειο|φαρμακείο|νοσοκομ[ειοίαή])\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text)
+    m = re.search(
+        r"(φαρμακειο|φαρμακείο|νοσοκομ[ειοίαή])\s+([\wάέίήύόώϊϋΐΰ\s\-]+)", text
+    )
     if m:
-        entities["area"] = m.group(2).strip().capitalize()
+        entities["area"] = m.group(2).strip().title()
         return entities
 
     # 6. Πιάσε φαρμακείο περιοχή από λίστα
@@ -82,11 +90,11 @@ def extract_entities(text: str, context_slot=None):
     words = text.split()
     if len(words) == 1 and 2 < len(words[0]) < 24:
         if context_slot == "TO":
-            entities["TO"] = words[0].capitalize()
+            entities["TO"] = words[0].title()
         elif context_slot == "FROM":
-            entities["FROM"] = words[0].capitalize()
+            entities["FROM"] = words[0].title()
         else:
-            entities["TO"] = words[0].capitalize()
+            entities["TO"] = words[0].title()
 
     return entities
 
