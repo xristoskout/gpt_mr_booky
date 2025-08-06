@@ -140,15 +140,20 @@ async def chat_endpoint(request: Request):
 
         # 1. Πάρε intent/entities
      
-        result = classifier.detect(user_message)
+        last_intent = sess_mgr.get_last_intent(user_id)
+        last_missing = (
+            sess_mgr.get_missing_slots(user_id, last_intent) if last_intent else []
+        )
+
+        result = classifier.detect(
+            user_message, active_intent=last_intent, missing_slots=last_missing
+        )
         intent = result.get("intent")
         entities = result.get("entities", {})
 
         logger.info(f"[INTENT]: {intent}, [ENTITIES]: {entities}")
 
         # 2. Slot-filling context patch: αν intent=default, unfinished last_intent, και κοντή απάντηση
-        last_intent = sess_mgr.get_last_intent(user_id)
-        last_missing = sess_mgr.get_missing_slots(user_id, last_intent) if last_intent else []
 
         if intent == "default" and last_intent and last_missing:
             slot_to_fill = last_missing[0]

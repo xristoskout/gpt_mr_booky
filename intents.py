@@ -3,7 +3,7 @@ import logging
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def extract_area(text: str) -> Optional[str]:
             area_variants += ["ριο"]
         for variant in area_variants:
             if variant in text_lower:
-                return area
+                 return area
     return None
 
 # ---- ΒΑΣΙΚΗ & ΕΥΦΥΗΣ ΑΝΑΓΝΩΡΙΣΗ entities ----
@@ -87,7 +87,6 @@ def extract_entities(text: str, context_slot=None):
             entities["FROM"] = words[0].capitalize()
         else:
             entities["TO"] = words[0].capitalize()
-        return entities
 
     return entities
 
@@ -113,26 +112,97 @@ class IntentClassifier:
 
         logger.info(f"✅ Loaded {len(self.intents)} intents")
 
-    def keyword_boosted(self, message: str) -> Optional[str]:
+    def keyword_boosted(
+        self,
+        message: str,
+        active_intent: Optional[str] = None,
+        missing_slots: Optional[List[str]] = None,
+    ) -> Optional[str]:
         nm = message.lower()
 
         # TripCostIntent πρέπει να προηγείται!
-        if any(k in nm for k in ("ποσο", "κοστος", "χρεωση", "τιμη", "χιλ", "χιλιομετρα", "χλμ", "μεχρι", "απο", "εως", "ως", "διαδρομη", "αποσταση", "δρομολογιο")):
+        if any(
+            k in nm
+            for k in (
+                "ποσο",
+                "κοστος",
+                "χρεωση",
+                "τιμη",
+                "χιλ",
+                "χιλιομετρα",
+                "χλμ",
+                "μεχρι",
+                "απο",
+                "εως",
+                "ως",
+                "διαδρομη",
+                "αποσταση",
+                "δρομολογιο",
+            )
+        ):
             return "TripCostIntent"
 
-        if any(k in nm for k in ("νοσοκομει","νοσοκομειο","νοσοκομεια", "κλινικ")):
+        if any(
+            k in nm
+            for k in ("νοσοκομει", "νοσοκομειο", "νοσοκομεια", "κλινικ")
+        ):
             return "HospitalIntent"
 
-        if any(k in nm for k in ("φαρμακει","φαρμακ", "διανυκτερευ")):
+        if any(k in nm for k in ("φαρμακει", "φαρμακ", "διανυκτερευ")):
             return "OnDutyPharmacyIntent"
 
-        if any(k in nm for k in ("πατρα", "πατρας", "κτελ", "οσε", "σταθμος","φαμε", "φαγητο", "εστιατορ", "μπαν","καφε", "μπάνι", "παραλι", "θαλασσ", "τηλεφωνο", "υπηρεσιες")):
-            return "PatrasLlmAnswersIntent"
+        if any(
+            k in nm
+            for k in (
+                "πατρα",
+                "πατρας",
+                "κτελ",
+                "οσε",
+                "σταθμος",
+                "φαμε",
+                "φαγητο",
+                "εστιατορ",
+                "μπαν",
+                "καφε",
+                "μπάνι",
+                "παραλι",
+                "θαλασσ",
+                "τηλεφωνο",
+                "υπηρεσιες",
+            )
+        ):
+            if not (active_intent and missing_slots):
+                return "PatrasLlmAnswersIntent"
 
-        if any(k in nm for k in ("κρατηση", "booking", "τηλεφωνο", "email", "επικοινωνια", "εφαρμογη", "app")):
+        if any(
+            k in nm
+            for k in (
+                "κρατηση",
+                "booking",
+                "τηλεφωνο",
+                "email",
+                "επικοινωνια",
+                "εφαρμογη",
+                "app",
+            )
+        ):
             return "ContactInfoIntent"
 
-        if any(k in nm for k in ("εκδρομη", "τουρ", "προορισμος", "ναυπακτος", "ολυμπια","πακετο", "οδηγος", "εκδρομες", "κανετε εκδρομες", "πακετα")):
+        if any(
+            k in nm
+            for k in (
+                "εκδρομη",
+                "τουρ",
+                "προορισμος",
+                "ναυπακτος",
+                "ολυμπια",
+                "πακετο",
+                "οδηγος",
+                "εκδρομες",
+                "κανετε εκδρομες",
+                "πακετα",
+            )
+        ):
             return "ServicesAndToursIntent"
 
         return None
@@ -151,8 +221,13 @@ class IntentClassifier:
         logger.debug(f"Fuzzy match: {best_intent} ({best_score:.2f})")
         return best_intent if best_score >= self.fuzzy_threshold else "default"
 
-    def detect(self, message: str) -> Dict[str, str]:
-        intent = self.keyword_boosted(message)
+    def detect(
+        self,
+        message: str,
+        active_intent: Optional[str] = None,
+        missing_slots: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        intent = self.keyword_boosted(message, active_intent, missing_slots)
         if intent:
             logger.info(f"📌 Boosted intent: {intent}")
         else:
