@@ -1,20 +1,30 @@
-# ✅ Ελαφριά εικόνα python
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-# ✅ Ορισμός root φακέλου του app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /app
 
-# ✅ Αντιγραφή μόνο των requirements για caching
-COPY requirements.txt .
+# Build deps μόνο αν τα χρειάζεσαι (κρατά τα, ok)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+ && rm -rf /var/lib/apt/lists/*
 
-# ✅ Εγκατάσταση των dependencies
+COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-# ✅ Αντιγραφή όλου του project (και των JSON knowledge files)
+# Όλος ο κώδικας
 COPY . .
 
-# ✅ Cloud Run ακούει στη θύρα 8080
-EXPOSE 8080
+# Compile-time έλεγχος συντακτικών λαθών
+# Αντί για heredoc, βάλε αυτό:
+RUN python -c "import py_compile; [py_compile.compile(f, doraise=True) for f in ['main.py','tools.py','api_clients.py','config.py','intents.py','constants.py']]; print('✔ py_compile OK')"
 
-# ✅ Εκκίνηση με gunicorn + uvicorn worker
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "-b", "0.0.0.0:8080", "main:app"]
+ENV PYTHONPATH=/app
+ENV OPENAI_AGENTS_DISABLE_TRACING=1
+# Το PORT το δίνει το Cloud Run
+ENV PORT=8080
+
+# Εκκίνηση (bind στο $PORT)
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:${PORT:-8080} main:app"]

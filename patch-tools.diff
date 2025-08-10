@@ -1,0 +1,276 @@
+*** a/tools.py
+--- b/tools.py
+@@
+-from typing import Any, Dict, List, Optional, Tuple
++from typing import Any, Dict, List, Optional, Tuple
+@@
+-def _estimate_price_and_time_km(distance_km: float) -> Dict[str, Any]:
+-    start_fee = TAXI_TARIFF.get("minimum_fare", 4.0)
+-    per_km    = TAXI_TARIFF.get("km_rate_zone2_or_night", 1.25)  # για intercity
+-    avg_kmh   = 85.0
++def _estimate_price_and_time_km(distance_km: float, *, night: bool = False) -> Dict[str, Any]:
++    """
++    Χονδρική εκτίμηση κόστους/χρόνου απόστασης (χωρίς διόδια).
++    - night=True → χρησιμοποίησε νυχτερινή/διπλή ταρίφα αν είναι διαθέσιμη στο TAXI_TARIFF.
++    """
++    start_fee = float(TAXI_TARIFF.get("minimum_fare", 4.0))
++    day_km    = float(TAXI_TARIFF.get("km_rate_city_or_day", TAXI_TARIFF.get("km_rate_zone1", 0.9)))
++    night_km  = float(TAXI_TARIFF.get("km_rate_zone2_or_night", max(day_km, 1.25)))
++    per_km    = night_km if night else day_km
++    avg_kmh   = 85.0  # intercity μέση ταχύτητα
+     duration_h = distance_km / avg_kmh
+     duration_min = int(round(duration_h * 60))
+     cost = start_fee + per_km * distance_km
+     return {
+         "distance_km": round(distance_km, 1),
+         "duration_min": duration_min,
+         "price_eur": round(cost, 2),
+     }
+@@
+-PLACE_SEP_PAT = r"(?:\s*[-–>|]\s*|\s+)"
++PLACE_SEP_PAT = r"(?:\s*[-–>|]\s*|,\s*|\s+)"
+@@
+ def _extract_route_free_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+@@
+-    t = unicodedata.normalize("NFKC", text or "").lower()
++    t = unicodedata.normalize("NFKC", text or "").lower()
+     t = re.sub(r"\s+", " ", t).strip(" ;,.;¿;;;?")
+ 
+     patterns = [
+         r"απ[όο]\s+(?P<origin>.+?)\s+(?:μέχρι|ως|προς|για|σε)\s+(?P<dest>.+)",
+         r"από\s+(?P<origin>.+?)\s+(?:μέχρι|ως|προς|για|σε)\s+(?P<dest>.+)",
+-        r"^(?P<origin>[^0-9]+?)\s+(?:μέχρι|προς|για|σε)\s+(?P<dest>.+)$",
+-        rf"^(?P<origin>[a-zα-ωάέίόήύώ\. ]+){PLACE_SEP_PAT}(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
++        r"^(?P<origin>[^0-9]+?)\s+(?:μέχρι|προς|για|σε|to)\s+(?P<dest>.+)$",
++        rf"^(?P<origin>[a-zα-ωάέίόήύώ\. ]+){PLACE_SEP_PAT}(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
+         r"πόσο\s+(?:κάνει|κοστίζει)\s+(?:να\s+)?(?:πάω|πάμε|μετάβαση)\s+(?:σε|προς)?\s*(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
+         r"^(?:μέχρι|προς|για)\s+(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
++        r"^(?:to|->)\s*(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
+     ]
+@@
+-    return None, None
++    return None, None
++
++def _detect_night_or_double_tariff(message: str, when: str) -> bool:
++    """
++    Ευρετική: αν ο χρήστης γράψει 'νύχτα', 'διπλή', 'double', ή αν το when μοιάζει νυχτερινό (00:00–05:00).
++    Δεν «μαντεύουμε» επιθετικά: είναι απλά flag για fallback κοστολόγηση.
++    """
++    t = (message or "").lower()
++    if re.search(r"νυχτ|διπλ|double", t):
++        return True
++    # when μπορεί να είναι 'now', 'tomorrow 02:30', '2025-08-10 01:15', κ.λπ.
++    m = re.search(r"\b(\d{1,2})[:.](\d{2})\b", (when or "").lower())
++    if m:
++        hh = int(m.group(1))
++        return 0 <= hh < 5
++    return False
+@@
+-@function_tool
+-def trip_quote_nlp(message: str, when: str = "now") -> str:
+-    """
+-    Βγάζει origin/destination από ελεύθερο ελληνικό κείμενο και καλεί το TIMOLOGIO API.
+-    - Αν δοθεί μόνο προορισμός, origin = 'Πάτρα'.
+-    - ΠΑΝΤΑ επιστρέφει και το Google Maps URL *μέσα στο κείμενο* για να φτιαχτεί κουμπί από το frontend.
+-    - Η διάρκεια είναι σε μορφή "Χ ώρες και Υ λεπτά".
+-    """
+-    logger.info("[tool] trip_quote_nlp: parsing route from message=%r", message)
+-    origin, dest = _extract_route_free_text(message)
+-    if not origin or not dest:
+-        return UI_TEXT.get("ask_trip_route", "❓ Πες μου από πού ξεκινάς και πού πας (π.χ. 'από Πάτρα μέχρι Λουτράκι').")
+-
+-def _price_band(eur: float, pct: float = 0.08) -> tuple[int, int]:
+-    low = eur * (1 - pct)
+-    high = eur * (1 + pct)
+-    # στρογγύλεψε στο πλησιέστερο 5€
+-    def r5(x): return int(round(x / 5.0)) * 5
+-    return max(0, r5(low)), r5(high)
+-
+-    # 1) Προσπάθησε Timologio
+-    data = {"error": "unavailable"}
+-    if TimologioClient is not None:
+-        try:
+-            client = TimologioClient()
+-            data = client.estimate_trip(origin, dest, when=when)
+-            logger.info("[tool] timologio response: %s", data)
+-        except Exception:
+-            logger.exception("[tool] timologio call failed")
+-
+-    # === SUCCESS PATH (Timologio OK) ===
+-    if isinstance(data, dict) and "error" not in data:
+-        price = (
+-            data.get("price_eur")
+-            or data.get("price")
+-            or data.get("total_eur")
+-            or data.get("fare")
+-        )
+-        dist = data.get("distance_km") or data.get("km") or data.get("distance")
+-    
+-    # ... μέσα στο success path του trip_quote_nlp:
+-    if price is not None:
+-        try:
+-            price_val = float(str(price).replace(",", "."))
+-            lo, hi = _price_band(price_val, pct=0.08)
+-            parts.append(f"💶 Εκτίμηση: {lo}–{hi}€")
+-        except Exception:
+-            parts.append(f"💶 Εκτίμηση: ~{price}€")
+-
+-        # duration: λεπτά / seconds / HH:MM / ISO "PT..."
+-        raw_dur = (
+-            data.get("duration_min")
+-            or data.get("minutes")
+-            or data.get("duration")
+-            or data.get("duration_seconds")
+-        )
+-        mins = _normalize_minutes(raw_dur, distance_km=dist)
+-        dur_text = _fmt_minutes(mins) if mins is not None else None
+-
+-        # map_url να υπάρχει στο ΚΕΙΜΕΝΟ (για να βγει το κουμπί στο UI)
+-        map_url = (
+-            data.get("map_url") or data.get("mapLink") or
+-            data.get("route_url") or data.get("map")
+-        )
+-
+-        parts = []
+-        if price is not None: parts.append(f"💶 Εκτίμηση: ~{price}€")
+-        if dist  is not None:
+-            try:
+-                parts.append(f"🛣️ Απόσταση: ~{round(float(dist), 2)} km")
+-            except Exception:
+-                parts.append(f"🛣️ Απόσταση: ~{dist} km")
+-        if dur_text is not None: parts.append(f"⏱️ Χρόνος: ~{dur_text}")
+-        if map_url: parts.append(f"📌 Δες τη διαδρομή στον χάρτη: {map_url}")
+-        parts.append("⚠️ Η τιμή δεν περιλαμβάνει διόδια.")
+-        return "\n".join(parts)
+-
+-    # === FALLBACK (Timologio down) ===
+-    logger.warning("[tool] timologio unavailable, using fallback")
+-    dist = _rough_distance_km(origin, dest)
+-    est = _estimate_price_and_time_km(dist)
+-    dur_text = _fmt_minutes(est["duration_min"])
+-    map_url = f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}&destination={quote_plus(dest)}&travelmode=driving"
+-    lo, hi = _price_band(est['price_eur'], pct=0.08)
+-    return (
+-        f"💶 Εκτίμηση: {lo}–{hi}€\n"
+-        f"🛣️ Απόσταση: ~{est['distance_km']} km\n"
+-        f"⏱️ Χρόνος: ~{dur_text}\n"
+-        f"📌 Δες τη διαδρομή στον χάρτη: {map_url}\n"
+-        f"{UI_TEXT.get('fare_disclaimer','⚠️ Η τιμή δεν περιλαμβάνει διόδια.')}"
+-    )
++def _price_band(eur: float, pct: float = 0.08) -> tuple[int, int]:
++    low = eur * (1 - pct)
++    high = eur * (1 + pct)
++    def r5(x):  # στρογγύλεμα στο πλησιέστερο 5€
++        return int(round(x / 5.0)) * 5
++    return max(0, r5(low)), r5(high)
++
++@function_tool
++def trip_quote_nlp(message: str, when: str = "now") -> str:
++    """
++    Βγάζει origin/destination από ελεύθερο κείμενο και καλεί Timologio (αν υπάρχει).
++    - Αν λείπει origin → 'Πάτρα'.
++    - ΠΑΝΤΑ βάζει Google Maps URL στο κείμενο (frontend κουμπί).
++    - Διάρκεια σε «Χ ώρες και Υ λεπτά».
++    """
++    logger.info("[tool] trip_quote_nlp: parsing route from message=%r", message)
++    origin, dest = _extract_route_free_text(message)
++    if not origin or not dest:
++        return UI_TEXT.get(
++            "ask_trip_route",
++            "❓ Πες μου από πού ξεκινάς και πού πας (π.χ. «Από Πάτρα μέχρι Διακοπτό»).",
++        )
++
++    night = _detect_night_or_double_tariff(message, when)
++
++    # 1) Timologio
++    data: Dict[str, Any] = {"error": "unavailable"}
++    if TimologioClient is not None:
++        try:
++            client = TimologioClient()
++            data = client.estimate_trip(origin, dest, when=when)
++            logger.info("[tool] timologio response: %s", data)
++        except Exception:
++            logger.exception("[tool] timologio call failed")
++
++    # 2) SUCCESS PATH
++    if isinstance(data, dict) and "error" not in data:
++        price = (
++            data.get("price_eur")
++            or data.get("price")
++            or data.get("total_eur")
++            or data.get("fare")
++        )
++        dist = data.get("distance_km") or data.get("km") or data.get("distance")
++        raw_dur = (
++            data.get("duration_min")
++            or data.get("minutes")
++            or data.get("duration")
++            or data.get("duration_seconds")
++        )
++        mins = _normalize_minutes(raw_dur, distance_km=dist)
++        dur_text = _fmt_minutes(mins) if mins is not None else None
++        map_url = (
++            data.get("map_url")
++            or data.get("mapLink")
++            or data.get("route_url")
++            or data.get("map")
++        )
++
++        parts: List[str] = []
++        if price is not None:
++            try:
++                price_val = float(str(price).replace(",", "."))
++                lo, hi = _price_band(price_val, pct=0.08)
++                parts.append(f"💶 Εκτίμηση: {lo}–{hi}€")
++            except Exception:
++                parts.append(f"💶 Εκτίμηση: ~{price}€")
++        if dist is not None:
++            try:
++                parts.append(f"🛣️ Απόσταση: ~{round(float(dist), 2)} km")
++            except Exception:
++                parts.append(f"🛣️ Απόσταση: ~{dist} km")
++        if dur_text is not None:
++            parts.append(f"⏱️ Χρόνος: ~{dur_text}")
++        if map_url:
++            parts.append(f"📌 Δες τη διαδρομή στον χάρτη: {map_url}")
++        parts.append(UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."))
++        return "\n".join(parts)
++
++    # 3) FALLBACK (Timologio down ή μη διαθέσιμο)
++    logger.warning("[tool] timologio unavailable, using fallback")
++    dist = _rough_distance_km(origin, dest)
++    est = _estimate_price_and_time_km(dist, night=night)
++    dur_text = _fmt_minutes(est["duration_min"])
++    map_url = (
++        f"https://www.google.com/maps/dir/?api=1"
++        f"&origin={quote_plus(origin)}&destination={quote_plus(dest)}&travelmode=driving"
++    )
++    lo, hi = _price_band(est["price_eur"], pct=0.08)
++    body = [
++        f"💶 Εκτίμηση: {lo}–{hi}€" + (" (νύχτα)" if night else ""),
++        f"🛣️ Απόσταση: ~{est['distance_km']} km",
++        f"⏱️ Χρόνος: ~{dur_text}",
++        f"📌 Δες τη διαδρομή στον χάρτη: {map_url}",
++        UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."),
++    ]
++    return "\n".join(body)
+@@
+ @function_tool
+-def trip_estimate(origin: str, destination: str) -> str:
++def trip_estimate(origin: str, destination: str, when: str = "now") -> str:
+     try:
+-        dist = _rough_distance_km(origin, destination)
+-        est = _estimate_price_and_time_km(dist)
++        dist = _rough_distance_km(origin, destination)
++        night = _detect_night_or_double_tariff("", when)
++        est = _estimate_price_and_time_km(dist, night=night)
+         return (
+-            f"💶 Εκτίμηση: ~{est['price_eur']}€\n"
++            f"💶 Εκτίμηση: ~{est['price_eur']}€" + (" (νύχτα)" if night else "") + "\n"
+             f"🛣️ Απόσταση: ~{est['distance_km']} km\n"
+             f"⏱️ Χρόνος: ~{_fmt_minutes(est['duration_min'])}\n"
+             f"⚠️ Η τιμή δεν περιλαμβάνει διόδια."
+         )
+     except Exception:
+         logger.exception("trip_estimate failed")
+         return "❌ Δεν μπόρεσα να υπολογίσω την εκτίμηση."

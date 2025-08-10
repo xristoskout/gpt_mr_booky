@@ -1,7 +1,14 @@
-# .gcloudignore
 .env
+.env.*
+**/__pycache__/**
+**/*.py[cod]
+.venv/
+venv/
 .git/
 .gitignore
-.gcloudignore
-__pycache__/
-*.pyc
+.DS_Store
+pytest_cache/
+.pytest_cache/
+node_modules/
+dist/
+build/

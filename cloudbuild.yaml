@@ -1,0 +1,11 @@
+# cloudbuild.yaml
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '--no-cache'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/mr-booky-backend:$BUILD_ID'
+      - '.'
+images:
+  - 'gcr.io/$PROJECT_ID/mr-booky-backend:$BUILD_ID'
