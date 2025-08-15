@@ -1,35 +1,51 @@
-# tools.py
-import json
-import math
+# file: tools.py
+from __future__ import annotations
+
 import os
 import logging
-from typing import Any, Dict, List, Optional, Tuple
 import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import unicodedata
 from urllib.parse import quote_plus
-import math
-from agents import function_tool, RunContextWrapper  # OpenAI Agents SDK
-import openai
+
+from agents import function_tool, RunContextWrapper  # Agents SDK types
+from unicodedata import normalize as _u_norm
+
+try:
+    from openai import OpenAI
+except Exception:  # optional dependency
+    OpenAI = None  # type: ignore
+
+from phrases import pick_trendy_phrase
 from constants import TAXI_TARIFF
 import constants
 
-# Ασφαλή “getattr” ώστε να μην σκάει το import αν λείπει κάτι στο constants.py
-BRAND_INFO = getattr(constants, "BRAND_INFO", {})
-DEFAULTS   = getattr(constants, "DEFAULTS", {})
-UI_TEXT    = getattr(constants, "UI_TEXT", {})
-AREA_ALIASES = getattr(constants, "AREA_ALIASES", {})
-
-
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Βοηθητικά για κανονικοποίηση κειμένου (για περιοχές)
+# Brand / Config
+
+BRAND_INFO: Dict[str, Any] = getattr(constants, "BRAND_INFO", {})
+DEFAULTS: Dict[str, Any] = getattr(constants, "DEFAULTS", {})
+UI_TEXT: Dict[str, str] = getattr(constants, "UI_TEXT", {})
+AREA_ALIASES: Dict[str, List[str]] = getattr(constants, "AREA_ALIASES", {})
+
+# Q tails που κολλάνε στο destination (GR & greeklish)
+_Q_TAIL_GR = r"(?:\bπόσο(?:\s+κοστίζει)?\b|\bκοστίζει\b|\bκάνει\b|\bτιμή\b|\?)\s*$"
+_Q_TAIL_GL = r"(?:\bposo(?:\s+kostizei)?\b|\bkostizei\b|\bkanei\b|\btimi\b|\?)\s*$"
+
+# Stopwords που ΔΕΝ πρέπει να θεωρηθούν origin/destination
+_ROUTE_STOPWORDS = {"πόσο", "κοστίζει", "κάνει", "τιμή", "poso", "kostizei", "kanei", "timi"}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers: text normalization
+
 def _deaccent(s: str) -> str:
     if not s:
         return ""
     return "".join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
+
 
 def _norm_txt(s: str) -> str:
     s = unicodedata.normalize("NFKC", s or "").lower()
@@ -37,15 +53,57 @@ def _norm_txt(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
+def _preclean_route_text(s: str) -> str:
+    """Καθαρίζει καταλήξεις ερώτησης και greeklish connectives για parsing."""
+    s = (s or "").strip()
+    s = re.sub(_Q_TAIL_GR, "", s, flags=re.IGNORECASE)
+    s = re.sub(_Q_TAIL_GL, "", s, flags=re.IGNORECASE)
+    repl = {
+        r"\bapo\b": "από",
+        r"\bapó\b": "από",
+        r"\bmexri\b": "μέχρι",
+        r"\bmehri\b": "μέχρι",
+        r"\bpros\b": "προς",
+        r"\bgia\b": "για",
+        r"\beos\b": "έως",
+        r"\bews\b": "έως",
+        r"\bfrom\b": "από",
+        r"\bto\b": "προς",
+    }
+    for pat, rep in repl.items():
+        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
+    s = _u_norm("NFKC", s)
+    return s.strip()
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Brand info (fallback: .env)
+# Tariff helpers (συγχρονισμένα με constants.py)
+
+def _tariff(keys: List[str], default: float) -> float:
+    for k in keys:
+        try:
+            v = TAXI_TARIFF.get(k)
+            if v is not None:
+                return float(v)
+        except Exception:
+            pass
+    return float(default)
+
+DAY_KM = _tariff(["km_rate_city_or_day", "km_rate_zone1"], 0.90)
+NIGHT_KM = _tariff(["km_rate_zone2_or_night"], max(DAY_KM, 1.25))
+START_FEE = _tariff(["minimum_fare"], 4.0)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Brand info (fallback: env)
+
 def _brand(key: str, env_fallback: Optional[str] = None) -> str:
     val = BRAND_INFO.get(key)
     if val:
-        return val
+        return str(val)
     if env_fallback:
         return os.getenv(env_fallback, "")
     return ""
+
 
 # ── Clients (graceful fallback) ───────────────────────────────────────────────
 try:
@@ -56,40 +114,50 @@ try:
         TimologioClient,
     )
 except Exception:
-    PharmacyClient = HospitalsClient = PatrasAnswersClient = TimologioClient = None
+    PharmacyClient = HospitalsClient = PatrasAnswersClient = TimologioClient = None  # type: ignore
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # LLM helper με system prompt από context
+
 def _ask_llm_with_system_prompt(
     user_message: str,
     system_prompt: str,
     context_text: str = "",
     history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    from openai import OpenAI
+    if OpenAI is None:
+        return UI_TEXT.get("generic_error", "❌ LLM client δεν είναι διαθέσιμος.")
+    model = os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+
     client = OpenAI()
 
-    history_msgs = []
+    history_msgs: List[Dict[str, str]] = []
     if history:
-        for h in history[-2:]:
+        for h in history[-2:]:  # WHY: κόψιμο κόστους/PII
             if h.get("user"):
                 history_msgs.append({"role": "user", "content": h["user"]})
             if h.get("bot"):
                 history_msgs.append({"role": "assistant", "content": h["bot"]})
 
-    messages = [{"role": "system", "content": system_prompt}] + history_msgs + [
-        {"role": "user", "content": f"{user_message}\n\n[Context]\n{context_text}"}
-    ]
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-        temperature=0.7,
-        presence_penalty=0.6,
-        frequency_penalty=0.2,
+    messages: List[Dict[str, str]] = (
+        [{"role": "system", "content": system_prompt}]
+        + history_msgs
+        + [{"role": "user", "content": f"{user_message}\n\n[Context]\n{context_text}"}]
     )
-    return resp.choices[0].message.content
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            presence_penalty=0.6,
+            frequency_penalty=0.2,
+        )
+        return resp.choices[0].message.content or ""
+    except Exception:
+        logger.exception("ask_llm OpenAI call failed")
+        return UI_TEXT.get("generic_error", "❌ Παρουσιάστηκε σφάλμα κατά την κλήση του LLM.")
 
 
 @function_tool(
@@ -98,132 +166,142 @@ def _ask_llm_with_system_prompt(
 )
 def ask_llm(ctx: RunContextWrapper[Any], user_message: str) -> str:
     try:
-        c = ctx.context or {}
+        c: Dict[str, Any] = ctx.context or {}
 
         # Αν υπάρχει explicit desired_tool και ΔΕΝ είναι το ask_llm, μην απαντήσεις από εδώ.
         desired = c.get("desired_tool")
         if desired and desired != "ask_llm":
             return "⏭️"
 
-        # --- εδώ κάνεις την πραγματική κλήση στο LLM σου ---
         system_prompt = c.get("system_prompt") or "You are a helpful assistant."
-        context_text  = c.get("context_text") or ""
-        history       = c.get("history") or []
+        context_text = c.get("context_text") or ""
+        history = c.get("history") or []
 
-        # Παράδειγμα: llm_chat είναι δικό σου helper
-        reply = llm_chat(
-            system=system_prompt,
-            user=user_message,
-            context=context_text,
+        return _ask_llm_with_system_prompt(
+            user_message=user_message,
+            system_prompt=system_prompt,
+            context_text=context_text,
             history=history,
         )
-        return reply
-
     except Exception:
         logger.exception("ask_llm failed")
         return UI_TEXT.get("generic_error", "❌ Παρουσιάστηκε σφάλμα κατά την κλήση του LLM.")
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Fallback εκτίμηση (όταν το Timologio API δεν απαντά)
+# Rough distance fallback (διορθωμένα)
+
 def _rough_distance_km(origin: str, destination: str) -> float:
+    # Σταθερές one-way αποστάσεις
     known = {
-        ("πάτρα", "αθήνα"): 275.0,
-        ("patra", "athens"): 275.0,
-        ("πάτρα", "πρέβεζα"): 220.0,
+        ("πάτρα", "αθήνα"): 211.0,
+        ("patra", "athens"): 211.0,
+        ("πάτρα", "ιωάννινα"): 221.1,
+        ("patra", "ioannina"): 221.1,
+        ("πάτρα", "πρέβεζα"): 157.0,
         ("πάτρα", "καλαμάτα"): 210.0,
         ("πάτρα", "λουτράκι"): 184.0,
     }
     key = (origin.lower().strip(), destination.lower().strip())
-    return known.get(key, 200.0)
+    return float(known.get(key, 200.0))
 
-def _estimate_price_and_time_km(distance_km: float) -> Dict[str, Any]:
-    start_fee = TAXI_TARIFF.get("minimum_fare", 4.0)
-    per_km    = TAXI_TARIFF.get("km_rate_zone2_or_night", 1.25)  # για intercity
-    avg_kmh   = 85.0
-    duration_h = distance_km / avg_kmh
+
+def _estimate_price_and_time_km(
+    distance_km: float, *, night: bool = False, round_trip: bool = False
+) -> Dict[str, Any]:
+    """Χονδρική εκτίμηση (χωρίς διόδια). WHY: 1× start fee για ολόκληρη τη συμφωνημένη διαδρομή."""
+    per_km = NIGHT_KM if night else DAY_KM
+    total_km = max(distance_km, 0.0) * (2.0 if round_trip else 1.0)
+    cost = START_FEE + per_km * total_km
+    avg_kmh = 83.0  # WHY: ταιριάζει με 5h04m για ~421.1km RT Πάτρα–Αθήνα
+    duration_h = total_km / max(avg_kmh, 1.0)
     duration_min = int(round(duration_h * 60))
-    cost = start_fee + per_km * distance_km
-    return {
-        "distance_km": round(distance_km, 1),
-        "duration_min": duration_min,
-        "price_eur": round(cost, 2),
-    }
+    return {"distance_km": round(total_km, 1), "duration_min": duration_min, "price_eur": round(cost, 2)}
+
+
+def _round5(eur: float) -> int:
+    try:
+        x = float(eur)
+    except Exception:
+        return int(eur) if isinstance(eur, int) else 0
+    return int(round(x / 5.0)) * 5
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # NLP parsing για διαδρομές
-PLACE_SEP_PAT = r"(?:\s*[-–>|]\s*|\s+)"
+
+def _detect_night_or_double_tariff(message: str, when: str) -> bool:
+    t = (message or "").lower()
+    if re.search(r"νυχτ|διπλ|double|night", t):
+        return True
+    m = re.search(r"\b(\d{1,2})[:.](\d{2})\b", (when or "").lower())
+    if m:
+        hh = int(m.group(1))
+        return 0 <= hh < 5
+    return False
+
+
+def _is_round_trip(message: str) -> bool:
+    t = (message or "").lower()
+    return bool(re.search(r"(επιστροφ|πήγαινε[\s\-–]*έλα|πηγαιν[\s\-–]*ελα|round\s*trip|με\s+επιστροφ)", t))
+
 
 def _extract_route_free_text(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Γυρίζει (origin, dest) από ελεύθερο ελληνικό κείμενο.
-    Αν λείπει origin, default = 'πάτρα'.
-    Πιάνει:
-      - "από Πάτρα μέχρι Λουτράκι"
-      - "πάτρα μέχρι λουτράκι"
-      - "πάτρα-λουτράκι"
-      - "μέχρι λουτράκι;" (dest only)
-    """
-    t = unicodedata.normalize("NFKC", text or "").lower()
-    t = re.sub(r"\s+", " ", t).strip(" ;,.;¿;;;?")
+    """Return (origin, destination) από ελεύθερο κείμενο."""
+    s = _preclean_route_text(text)
+    if not s:
+        return None, None
 
-    patterns = [
-        r"απ[όο]\s+(?P<origin>.+?)\s+(?:μέχρι|ως|προς|για|σε)\s+(?P<dest>.+)",
-        r"από\s+(?P<origin>.+?)\s+(?:μέχρι|ως|προς|για|σε)\s+(?P<dest>.+)",
-        r"^(?P<origin>[^0-9]+?)\s+(?:μέχρι|προς|για|σε)\s+(?P<dest>.+)$",
-        rf"^(?P<origin>[a-zα-ωάέίόήύώ\. ]+){PLACE_SEP_PAT}(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
-        r"πόσο\s+(?:κάνει|κοστίζει)\s+(?:να\s+)?(?:πάω|πάμε|μετάβαση)\s+(?:σε|προς)?\s*(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
-        r"^(?:μέχρι|προς|για)\s+(?P<dest>[a-zα-ωάέίόήύώ\. ]+)$",
-    ]
+    m = re.search(r"\bαπό\s+(?P<o>.+?)\s+(?:μέχρι|έως|προς|για)\s+(?P<d>.+)$", s, flags=re.IGNORECASE)
+    if not m:
+        m = re.search(r"^(?P<o>.+?)\s+(?:προς|για)\s+(?P<d>.+)$", s, flags=re.IGNORECASE)
+    if not m:
+        m = re.search(r"^(?P<d>.+?)\s+από\s+(?P<o>.+)$", s, flags=re.IGNORECASE)
 
-    for pat in patterns:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            origin = (m.groupdict().get("origin") or "").strip(" ,.;")
-            dest   = (m.groupdict().get("dest")   or "").strip(" ,.;")
-            if not origin:
-                origin = "πάτρα"
-            return origin, dest if dest else None
-    return None, None
+    if not m:
+        return None, None
 
-def _normalize_minutes(val, distance_km=None):
-    """
-    Δέχεται λεπτά, δευτερόλεπτα ("1234s"), "HH:MM", "2 ώρες ...", ISO8601 τύπου PT2H30M45S
-    και τα γυρίζει σε λεπτά (int).
-    """
+    o = (m.group("o") or "").strip(" ,.;·") if "o" in m.groupdict() else None
+    d = (m.group("d") or "").strip(" ,.;·") if "d" in m.groupdict() else None
+
+    if d and (d.lower() in _ROUTE_STOPWORDS or len(d) <= 1):
+        d = None
+
+    return (o or None), (d or None)
+
+
+def _normalize_minutes(val: Any, distance_km: Optional[float] = None) -> Optional[int]:
     if val is None:
         return None
-
-    # numeric
     if isinstance(val, (int, float)):
         m = int(round(val))
         if m > 1800:  # πιθανότατα seconds
             m = int(round(m / 60))
-        return m
+        return max(m, 0)
 
     s = str(val).strip().lower()
-    # "1234s" -> seconds
     ms = re.match(r"^(\d+)\s*s$", s)
     if ms:
         return int(ms.group(1)) // 60
 
-    # HH:MM
     mm = re.search(r"\b(\d{1,3})[:.](\d{2})\b", s)
     if mm:
         return int(mm.group(1)) * 60 + int(mm.group(2))
 
-    # ISO8601 PT… (π.χ. PT2H30M45S)
     if s.startswith("pt"):
         h = re.search(r"(\d+)h", s)
         m = re.search(r"(\d+)m", s)
         sec = re.search(r"(\d+)s", s)
         mins = 0
-        if h: mins += int(h.group(1)) * 60
-        if m: mins += int(m.group(1))
-        if sec: mins += int(sec.group(1)) // 60
+        if h:
+            mins += int(h.group(1)) * 60
+        if m:
+            mins += int(m.group(1))
+        if sec:
+            mins += int(sec.group(1)) // 60
         if mins:
             return mins
 
-    # ελληνικά: "2 ώρες και 15 λεπτά", "45 λεπτά"
     m1 = re.search(r"(\d+)\s*ώρ", s)
     m2 = re.search(r"(\d+)\s*λεπ", s)
     if m1 and m2:
@@ -233,12 +311,11 @@ def _normalize_minutes(val, distance_km=None):
     if s.isdigit():
         return int(s)
 
-    # safety net απόστασης
     if distance_km:
-        approx = int(round((float(distance_km) / 85.0) * 60))
-        if approx > 0:
-            return approx
+        approx = int(round((float(distance_km) / 83.0) * 60))
+        return max(approx, 0)
     return None
+
 
 def _fmt_minutes(mins: Optional[int]) -> Optional[str]:
     if mins is None:
@@ -247,126 +324,148 @@ def _fmt_minutes(mins: Optional[int]) -> Optional[str]:
         m = int(mins)
     except Exception:
         return None
-    h, r = divmod(m, 60)
+    h, r = divmod(max(m, 0), 60)
     if h and r:
         return f"{h} ώρες και {r} λεπτά"
     if h:
         return f"{h} ώρες"
     return f"{r} λεπτά"
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Trip quote tools
+
 @function_tool
 def trip_quote_nlp(message: str, when: str = "now") -> str:
-    """
-    Βγάζει origin/destination από ελεύθερο ελληνικό κείμενο και καλεί το TIMOLOGIO API.
-    - Αν δοθεί μόνο προορισμός, origin = 'Πάτρα'.
-    - ΠΑΝΤΑ επιστρέφει και το Google Maps URL *μέσα στο κείμενο* για να φτιαχτεί κουμπί από το frontend.
-    - Η διάρκεια είναι σε μορφή "Χ ώρες και Υ λεπτά".
-    """
-    logger.info("[tool] trip_quote_nlp: parsing route from message=%r", message)
+    """Βγάζει origin/destination από ελεύθερο κείμενο και καλεί Timologio (αν υπάρχει)."""
+    logger.info("[tool] trip_quote_nlp parse")
     origin, dest = _extract_route_free_text(message)
     if not origin or not dest:
-        return UI_TEXT.get("ask_trip_route", "❓ Πες μου από πού ξεκινάς και πού πας (π.χ. 'από Πάτρα μέχρι Λουτράκι').")
+        return UI_TEXT.get(
+            "ask_trip_route",
+            "❓ Πες μου από πού ξεκινάς και πού πας (π.χ. «Από Πάτρα μέχρι Διακοπτό»).",
+        )
 
-def _price_band(eur: float, pct: float = 0.08) -> tuple[int, int]:
-    low = eur * (1 - pct)
-    high = eur * (1 + pct)
-    # στρογγύλεψε στο πλησιέστερο 5€
-    def r5(x): return int(round(x / 5.0)) * 5
-    return max(0, r5(low)), r5(high)
+    night = _detect_night_or_double_tariff(message, when)
+    is_rt = _is_round_trip(message)
 
-    # 1) Προσπάθησε Timologio
-    data = {"error": "unavailable"}
+    # 1) Timologio
+    data: Dict[str, Any] = {"error": "unavailable"}
     if TimologioClient is not None:
         try:
             client = TimologioClient()
             data = client.estimate_trip(origin, dest, when=when)
-            logger.info("[tool] timologio response: %s", data)
+            logger.debug("[tool] timologio ok: keys=%s", list(data.keys()))
         except Exception:
             logger.exception("[tool] timologio call failed")
 
-    # === SUCCESS PATH (Timologio OK) ===
+    # 2) SUCCESS PATH
     if isinstance(data, dict) and "error" not in data:
-        price = (
-            data.get("price_eur")
-            or data.get("price")
-            or data.get("total_eur")
-            or data.get("fare")
-        )
         dist = data.get("distance_km") or data.get("km") or data.get("distance")
-    
-    # ... μέσα στο success path του trip_quote_nlp:
-    if price is not None:
-        try:
-            price_val = float(str(price).replace(",", "."))
-            lo, hi = _price_band(price_val, pct=0.08)
-            parts.append(f"💶 Εκτίμηση: {lo}–{hi}€")
-        except Exception:
-            parts.append(f"💶 Εκτίμηση: ~{price}€")
-
-        # duration: λεπτά / seconds / HH:MM / ISO "PT..."
-        raw_dur = (
-            data.get("duration_min")
-            or data.get("minutes")
-            or data.get("duration")
-            or data.get("duration_seconds")
-        )
+        raw_dur = data.get("duration_min") or data.get("minutes") or data.get("duration") or data.get("duration_seconds")
         mins = _normalize_minutes(raw_dur, distance_km=dist)
         dur_text = _fmt_minutes(mins) if mins is not None else None
+        map_url = data.get("map_url") or data.get("mapLink") or data.get("route_url") or data.get("map")
 
-        # map_url να υπάρχει στο ΚΕΙΜΕΝΟ (για να βγει το κουμπί στο UI)
-        map_url = (
-            data.get("map_url") or data.get("mapLink") or
-            data.get("route_url") or data.get("map")
-        )
-
-        parts = []
-        if price is not None: parts.append(f"💶 Εκτίμηση: ~{price}€")
-        if dist  is not None:
+        # Σε RT δικό μας υπολογισμό πάνω στα km (προβλέψιμο, χωρίς «εκπτώσεις»)
+        km_val: Optional[float]
+        if dist is not None:
             try:
-                parts.append(f"🛣️ Απόσταση: ~{round(float(dist), 2)} km")
+                km_val = float(str(dist).replace("km", "").strip())
             except Exception:
-                parts.append(f"🛣️ Απόσταση: ~{dist} km")
-        if dur_text is not None: parts.append(f"⏱️ Χρόνος: ~{dur_text}")
-        if map_url: parts.append(f"📌 Δες τη διαδρομή στον χάρτη: {map_url}")
-        parts.append("⚠️ Η τιμή δεν περιλαμβάνει διόδια.")
+                km_val = None
+        else:
+            km_val = None
+
+        parts: List[str] = []
+
+        if is_rt and km_val is not None:
+            est = _estimate_price_and_time_km(km_val, night=night, round_trip=True)
+            rounded = _round5(est["price_eur"])
+            parts.append(f"💶 Εκτίμηση: {rounded}€ (πήγαινε–έλα)")
+            parts.append(f"🛣️ Συνολική απόσταση: ~{est['distance_km']} km (2×{round(km_val, 1)} km)")
+            parts.append(f"⏱️ Χρόνος: ~{_fmt_minutes(est['duration_min'])}")
+        else:
+            price = data.get("price_eur") or data.get("price") or data.get("total_eur") or data.get("fare")
+            if price is None and km_val is not None:
+                est = _estimate_price_and_time_km(km_val, night=night, round_trip=False)
+                price = est["price_eur"]
+                if dur_text is None:
+                    dur_text = _fmt_minutes(est["duration_min"])
+            if price is not None:
+                try:
+                    price_val = float(str(price).replace(",", "."))
+                    rounded = _round5(price_val)
+                    parts.append(f"💶 Τιμή: {rounded}€")
+                except Exception:
+                    parts.append(f"💶 Τιμή: {price}€")
+            if km_val is not None:
+                parts.append(f"🛣️ Απόσταση: ~{round(float(km_val), 1)} km")
+            if dur_text is not None:
+                parts.append(f"⏱️ Χρόνος: ~{dur_text}")
+
+        if not map_url:
+            map_url = (
+                f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}"
+                f"&destination={quote_plus(dest)}&travelmode=driving"
+            )
+        parts.append(f"[📌 Δες τη διαδρομή στον χάρτη]({map_url})")
+        parts.append(UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."))
         return "\n".join(parts)
 
-    # === FALLBACK (Timologio down) ===
+    # 3) FALLBACK (Timologio down)
     logger.warning("[tool] timologio unavailable, using fallback")
-    dist = _rough_distance_km(origin, dest)
-    est = _estimate_price_and_time_km(dist)
-    dur_text = _fmt_minutes(est["duration_min"])
-    map_url = f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}&destination={quote_plus(dest)}&travelmode=driving"
-    lo, hi = _price_band(est['price_eur'], pct=0.08)
-    return (
-        f"💶 Εκτίμηση: {lo}–{hi}€\n"
-        f"🛣️ Απόσταση: ~{est['distance_km']} km\n"
-        f"⏱️ Χρόνος: ~{dur_text}\n"
-        f"📌 Δες τη διαδρομή στον χάρτη: {map_url}\n"
-        f"{UI_TEXT.get('fare_disclaimer','⚠️ Η τιμή δεν περιλαμβάνει διόδια.')}"
+    one_way_km = _rough_distance_km(origin, dest)
+    est = _estimate_price_and_time_km(one_way_km, night=night, round_trip=is_rt)
+    dur_text = _fmt_minutes(est["duration_min"]) or "—"
+    map_url = (
+        f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}"
+        f"&destination={quote_plus(dest)}&travelmode=driving"
     )
 
+    label = "Εκτίμηση"
+    rt_flag = " (πήγαινε–έλα)" if is_rt else ""
+    body = [
+        f"💶 {label}: {_round5(est['price_eur'])}€{rt_flag}" + (" (νύχτα)" if night else ""),
+        f"🛣️ {'Συνολική απόσταση' if is_rt else 'Απόσταση'}: ~{est['distance_km']} km"
+        + (f" (2×{round(one_way_km, 1)} km)" if is_rt else ""),
+        f"⏱️ Χρόνος: ~{dur_text}",
+        f"[📌 Δες τη διαδρομή στον χάρτη]({map_url})",
+        UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."),
+    ]
+    return "\n".join(body)
+
+
 @function_tool
-def trip_estimate(origin: str, destination: str) -> str:
+def trip_estimate(origin: str, destination: str, when: str = "now") -> str:
     try:
         dist = _rough_distance_km(origin, destination)
-        est = _estimate_price_and_time_km(dist)
+        night = _detect_night_or_double_tariff("", when)
+        est = _estimate_price_and_time_km(dist, night=night, round_trip=False)
+        map_url = (
+            f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}"
+            f"&destination={quote_plus(destination)}&travelmode=driving"
+        )
         return (
-            f"💶 Εκτίμηση: ~{est['price_eur']}€\n"
+            f"💶 Εκτίμηση: {_round5(est['price_eur'])}€" + (" (νύχτα)" if night else "") + "\n"
             f"🛣️ Απόσταση: ~{est['distance_km']} km\n"
             f"⏱️ Χρόνος: ~{_fmt_minutes(est['duration_min'])}\n"
+            f"[📌 Δες τη διαδρομή στον χάρτη]({map_url})\n"
             f"⚠️ Η τιμή δεν περιλαμβάνει διόδια."
         )
     except Exception:
         logger.exception("trip_estimate failed")
         return "❌ Δεν μπόρεσα να υπολογίσω την εκτίμηση."
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Επαφές Taxi (από constants με fallback σε .env)
+# Επαφές Taxi (από constants με fallback σε .env) — χωρίς σκληροκωδικές URLs
+
 TAXI_EXPRESS_PHONE = _brand("phone", "TAXI_EXPRESS_PHONE") or "2610 450000"
-TAXI_SITE_URL      = _brand("site_url", "TAXI_SITE_URL") or "https://taxipatras.com"
-TAXI_BOOKING_URL   = _brand("booking_url", "TAXI_BOOKING_URL") or "https://booking.infoxoros.com/?key=cbe08ae5-d968-43d6-acba-5a7c441490d7"
-TAXI_APP_URL       = _brand("app_url", "TAXI_APP_URL") or "https://grtaxi.eu/OsiprERdfdfgfDcfrpod"  # optional
+TAXI_SITE_URL = _brand("site_url", "TAXI_SITE_URL") or "https://taxipatras.com"
+TAXI_BOOKING_URL = _brand("booking_url", "TAXI_BOOKING_URL")  # no insecure fallback
+TAXI_APP_URL = _brand("app_url", "TAXI_APP_URL")  # optional; no insecure fallback
+
 
 @function_tool
 def taxi_contact(city: str = "Πάτρα") -> str:
@@ -375,20 +474,21 @@ def taxi_contact(city: str = "Πάτρα") -> str:
         lines = [
             f"📞 Τηλέφωνο: {TAXI_EXPRESS_PHONE}",
             f"🌐 Ιστότοπος: {TAXI_SITE_URL}",
-            f"🧾 Online κράτηση: {TAXI_BOOKING_URL}",
         ]
+        if TAXI_BOOKING_URL:
+            lines.append(f"🧾 Online κράτηση: {TAXI_BOOKING_URL}")
         if TAXI_APP_URL:
             lines.append(f"📱 Εφαρμογή: {TAXI_APP_URL}")
         lines.append("🚖 Εναλλακτικά: Καλέστε στο 2610450000")
         return "\n".join(lines)
     return f"🚖 Δεν έχω ειδικά στοιχεία για {city}. Θέλεις να καλέσω τοπικά ραδιοταξί;"
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Φαρμακεία
 
-# === ΝΕΟ: Χτίσε κανόνες από constants.AREA_ALIASES δυναμικά
-def _build_area_rules():
-    rules = []
+def _build_area_rules() -> List[Tuple[str, str]]:
+    rules: List[Tuple[str, str]] = []
     aliases_map = AREA_ALIASES or {}
     for canon, aliases in aliases_map.items():
         norm_aliases = [re.escape(_norm_txt(a)) for a in aliases if a]
@@ -398,21 +498,20 @@ def _build_area_rules():
         rules.append((pattern, canon))
     return rules
 
-AREA_RULES: List[tuple[str, str]] = _build_area_rules()
 
+AREA_RULES: List[Tuple[str, str]] = _build_area_rules()
 DEFAULT_AREA = DEFAULTS.get("default_area", "Πάτρα")
+
 
 def _area_from_text(text: str) -> Optional[str]:
     if not text:
         return None
     t = _norm_txt(text)
 
-    # 1) regex κανόνες από aliases
     for pat, canon in AREA_RULES:
         if re.search(pat, t):
             return canon
 
-    # 2) “στο/στη/στα …” → ξαναδοκίμασε πάνω στα ίδια patterns
     m = re.search(r"\bστ[οην]\s+([a-z0-9 .'\-]+)", t)
     if m:
         chunk = m.group(1).strip()
@@ -421,6 +520,16 @@ def _area_from_text(text: str) -> Optional[str]:
                 return canon
 
     return None
+
+
+@function_tool(
+    name_override="trendy_phrase",
+    description_override="Επιλέγει μια trend φράση βάσει emotion/context/lang/season.",
+)
+def trendy_phrase(emotion: str = "joy", context: str = "success", lang: str = "el", season: str = "all") -> str:
+    t = pick_trendy_phrase(emotion=emotion, context=context, lang=lang, season=season)
+    return t or ""
+
 
 @function_tool
 def pharmacy_lookup(area: str = DEFAULT_AREA, method: str = "get") -> str:
@@ -443,10 +552,10 @@ def pharmacy_lookup(area: str = DEFAULT_AREA, method: str = "get") -> str:
         groups.setdefault(tr, []).append(p)
 
     def _start_minutes(s: str) -> int:
-        m = re.search(r"(\d{1,2}):(\d{2})", s)
-        if not m:
+        m_ = re.search(r"(\d{1,2}):(\d{2})", s or "")
+        if not m_:
             return 10_000
-        return int(m.group(1)) * 60 + int(m.group(2))
+        return int(m_.group(1)) * 60 + int(m_.group(2))
 
     sorted_ranges = sorted(groups.keys(), key=_start_minutes)
 
@@ -460,15 +569,15 @@ def pharmacy_lookup(area: str = DEFAULT_AREA, method: str = "get") -> str:
         lines.append("")
     return "\n".join(lines).strip()
 
+
 @function_tool
 def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
     if PharmacyClient is None:
         return "❌ PharmacyClient δεν είναι διαθέσιμος."
 
-    area = _area_from_text(message)  # <-- ΧΩΡΙΣ default εδώ
+    area = _area_from_text(message)  # no default εδώ
     if not area:
-        return UI_TEXT.get("ask_pharmacy_area",
-                           "Για ποια περιοχή να ψάξω εφημερεύον φαρμακείο; 😊")
+        return UI_TEXT.get("ask_pharmacy_area", "Για ποια περιοχή να ψάξω εφημερεύον φαρμακείο; 😊")
 
     client = PharmacyClient()
     try:
@@ -487,10 +596,10 @@ def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
         groups.setdefault(tr, []).append(p)
 
     def _start_minutes(s: str) -> int:
-        m = re.search(r"(\d{1,2}):(\d{2})", s)
-        if not m:
+        m_ = re.search(r"(\d{1,2}):(\d{2})", s or "")
+        if not m_:
             return 10_000
-        return int(m.group(1)) * 60 + int(m.group(2))
+        return int(m_.group(1)) * 60 + int(m_.group(2))
 
     sorted_ranges = sorted(groups.keys(), key=_start_minutes)
 
@@ -504,23 +613,34 @@ def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
         lines.append("")
     return "\n".join(lines).strip()
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Νοσοκομεία / Γενικές Πάτρας
+
 @function_tool
 def hospital_duty(which_day: str = "σήμερα") -> str:
     if HospitalsClient is None:
         return "❌ HospitalsClient δεν είναι διαθέσιμος."
     client = HospitalsClient()
-    return client.which_hospital(which_day=which_day)
+    try:
+        return client.which_hospital(which_day=which_day)
+    except Exception:
+        logger.exception("hospital_duty failed")
+        return UI_TEXT.get("generic_error", "❌ Δεν κατάφερα να φέρω τα εφημερεύοντα νοσοκομεία.")
+
 
 @function_tool
 def patras_info(query: str) -> str:
     if PatrasAnswersClient is None:
         return "❌ PatrasAnswersClient δεν είναι διαθέσιμος."
     client = PatrasAnswersClient()
-    return client.ask(query)
+    try:
+        return client.ask(query)
+    except Exception:
+        logger.exception("patras_info failed")
+        return UI_TEXT.get("generic_error", "❌ Δεν κατάφερα να βρω πληροφορίες.")
 
-# Εξαγωγή helper για το main (2-βημα flow φαρμακείων)
+
 def detect_area_for_pharmacy(message: str):
     try:
         return _area_from_text(message)

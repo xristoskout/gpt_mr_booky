@@ -2,7 +2,6 @@ import os
 import logging
 import re
 from typing import Any, Dict, Optional
-
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
@@ -10,15 +9,22 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+def _env_url(*names: str) -> str:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v.rstrip("/")
+    return ""
+
+
 class BaseClient:
-    def __init__(self, base_url_env: str, default_path: str = "/", timeout: int = 10):
-        base = os.getenv(base_url_env, "").rstrip("/")
+    def __init__(self, base_url_env: str, default_path: str = "/", timeout: int = 10, *, alt_env: tuple[str, ...] = ()): 
+        base = _env_url(base_url_env, *alt_env)
         if not base:
             raise RuntimeError(f"Missing base URL for {base_url_env} in .env")
         self.base_url = base
         self.default_path = default_path
         self.timeout = timeout
-
         self.s = requests.Session()
         self.s.headers.update({"Accept": "application/json"})
         token = os.getenv("SERVICE_BEARER_TOKEN")  # προαιρετικό
@@ -67,22 +73,30 @@ class BaseClient:
 
 class PharmacyClient(BaseClient):
     def __init__(self):
-        super().__init__("PHARMACY_API_URL", default_path="pharmacy")
+        # support both *_URL and *_BASE env names
+        super().__init__("PHARMACY_API_URL", default_path="on_duty", alt_env=("PHARMACY_API_BASE",))
 
     def get_on_duty(self, area: str = "Πάτρα", method: str = "get"):
-        if method.lower() == "get":
-            return self._get({"area": area}, path="pharmacy")
-        elif method.lower() == "post":
-            return self._post({"area": area}, path="pharmacy")
-        else:
-            raise ValueError("Invalid method. Use 'get' or 'post'.")
-
+        last_err = None
+        for path in ("on_duty", "pharmacy"):
+            try:
+                if method.lower() == "get":
+                    return self._get({"area": area}, path=path)
+                elif method.lower() == "post":
+                    return self._post({"area": area}, path=path)
+                else:
+                    raise ValueError("Invalid method. Use 'get' or 'post'.")
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err:
+            raise last_err
 
 # ===================== HOSPITALS =====================
 
 class HospitalsClient(BaseClient):
     def __init__(self):
-        super().__init__("HOSPITAL_API_URL", default_path="webhook")
+        super().__init__("HOSPITAL_API_URL", default_path="webhook", alt_env=("HOSPITAL_API_BASE",))
 
     def which_hospital(self, which_day: str = "σήμερα") -> str:
         wd = (which_day or "").strip().lower()
@@ -135,7 +149,11 @@ class HospitalsClient(BaseClient):
 
 class PatrasAnswersClient(BaseClient):
     def __init__(self):
-        super().__init__("PATRAS_LLM_ANSWERS_API_URL", default_path="")
+        super().__init__(
+            "PATRAS_LLM_ANSWERS_API_URL",
+            default_path="",
+            alt_env=("PATRAS_LLM_ANSWERS_API_BASE", "PATRAS_ANSWERS_API_BASE"),
+        )
 
     def ask(self, message: str, user_id: str = "agent_router") -> str:
         payload = {"question": message}
@@ -162,7 +180,7 @@ class TimologioClient(BaseClient):
     Επιστρέφει dict με κλειδιά: price_eur, distance_km, duration_min, map_url (όπου γίνεται).
     """
     def __init__(self):
-        super().__init__("TIMOLOGIO_API_URL", default_path="fare")
+        super().__init__("TIMOLOGIO_API_URL", default_path="fare", alt_env=("TIMOLOGIO_API_BASE",))
 
     def estimate_trip(self, origin: str, destination: str, when: str = "now") -> Dict[str, Any]:
         # 1) GET /fare (δύο παραλλαγές)

@@ -6,6 +6,7 @@ annotated-types==0.7.0
 anyio==4.10.0
 attrs==25.3.0
 beautifulsoup4==4.13.4
+black
 blinker==1.9.0
 cachetools==5.5.2
 certifi==2025.8.3
@@ -70,8 +71,8 @@ pytest==8.4.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-multipart==0.0.20
-pywin32==311
 PyYAML==6.0.2
+redis>=5.0.0
 referencing==0.36.2
 requests==2.32.4
 rpds-py==0.27.0

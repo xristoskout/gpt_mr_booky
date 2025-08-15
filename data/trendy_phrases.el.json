@@ -1,0 +1,32 @@
+[
+  {
+    "text": "Μπήκαμε λάθος; 😅",
+    "emotion": "surprise",
+    "vibe": "playful",
+    "context_tags": ["fallback", "misunderstanding"],
+    "season": "2025-summer",
+    "lang": "el",
+    "weight": 0.9,
+    "nsfw": false
+  },
+  {
+    "text": "Ωραία πήγε αυτό! 🔥",
+    "emotion": "joy",
+    "vibe": "hype",
+    "context_tags": ["success", "price_quote"],
+    "season": "2025-summer",
+    "lang": "el",
+    "weight": 0.7,
+    "nsfw": false
+  },
+  {
+    "text": "Χμμ… κάτι δεν μου κάθεται 🤔",
+    "emotion": "neutral",
+    "vibe": "witty",
+    "context_tags": ["low_confidence", "fallback"],
+    "season": "all",
+    "lang": "el",
+    "weight": 0.5,
+    "nsfw": false
+  }
+]

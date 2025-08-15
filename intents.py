@@ -105,7 +105,7 @@ class IntentConfig:
 
 
 class IntentClassifier:
-    def __init__(self, intents_path: Path = INTENTS_FILE, fuzzy_threshold: float = 0.8) -> None:
+    def __init__(self, intents_path: Path = INTENTS_FILE, fuzzy_threshold: float = 0.7) -> None:
         self.fuzzy_threshold = fuzzy_threshold
         self.intents: Dict[str, IntentConfig] = {}
 

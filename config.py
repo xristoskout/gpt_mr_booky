@@ -1,25 +1,97 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import HttpUrl, EmailStr, Field
+# file: config.py
+from __future__ import annotations
 
-class Settings(BaseSettings):
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
-    pharmacy_api_url: str = Field(..., env="PHARMACY_API_URL")
-    hospital_api_url: str = Field(..., env="HOSPITAL_API_URL")
-    timologio_api_url: str = Field(..., env="TIMOLOGIO_API_URL")
-    patras_llm_answers_api_url: str = Field(..., env="PATRAS_LLM_ANSWERS_API_URL")
-    service_bearer_token: str | None = Field(default=None, env="SERVICE_BEARER_TOKEN")
+from typing import List, Optional, Union
 
-    taxi_express_phone: str | None = None
-    taxi_website_url: HttpUrl | None = None
-    taxi_app_url: HttpUrl | str | None = None
-    taxi_booking_url: HttpUrl | str | None = None
-    taxi_email: EmailStr | str | None = None
+# Prefer Pydantic v2 (pydantic-settings). Fallback to v1 if not installed.
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict  # type: ignore
+    from pydantic import field_validator  # type: ignore
 
-    # Αν στο .env έχεις λίστα CORs τύπου: http://localhost:3000,https://taxipatras.com
-    # κράτα το ως string και κάνε split αλλού (π.χ. στο main) πριν το περάσεις στο CORSMiddleware.
-    cors_origins: str = Field(default="*")
+    class Settings(BaseSettings):
+        ENV: str = "dev"
+        # Accept comma-separated string, JSON array, list or empty
+        ALLOWED_ORIGINS: Union[str, List[str], None] = None
+        ALLOWED_ORIGIN_REGEX: Optional[str] = None
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        extra="ignore",  # βάλε "forbid" αν θέλεις αυστηρότητα και έχεις ΜΟΝΟ δηλωμένα κλειδιά
-    )
+        PERSIST_BACKEND: str = "memory"  # memory|redis
+        REDIS_URL: Optional[str] = None
+
+        TOOL_TIMEOUT_SEC: int = 25
+        MAX_BODY_BYTES: int = 1_000_000
+        MAX_MESSAGE_CHARS: int = 2000
+
+        RATE_LIMIT_WINDOW_SEC: int = 60
+        RATE_LIMIT_MAX_REQ: int = 60
+
+        # Important: ignore extra env vars (TRENDY_PROB, OPENAI_API_KEY, etc.)
+        model_config = SettingsConfigDict(
+            env_file=".env",
+            env_file_encoding="utf-8",
+            extra="ignore",
+            case_sensitive=False,
+        )
+
+        @field_validator("ALLOWED_ORIGINS", mode="before")
+        @classmethod
+        def _parse_origins(cls, v):
+            if v is None or v == "":
+                return []
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                s = v.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        import json
+                        parsed = json.loads(s)
+                        if isinstance(parsed, list):
+                            return [str(x).strip() for x in parsed if str(x).strip()]
+                    except Exception:
+                        pass
+                return [s2.strip() for s2 in s.split(",") if s2.strip()]
+            return v
+
+except Exception:
+    # Pydantic v1 fallback
+    from pydantic import BaseSettings, validator
+
+    class Settings(BaseSettings):
+        ENV: str = "dev"
+        ALLOWED_ORIGINS: List[str] = []
+        ALLOWED_ORIGIN_REGEX: Optional[str] = None
+
+        PERSIST_BACKEND: str = "memory"
+        REDIS_URL: Optional[str] = None
+
+        TOOL_TIMEOUT_SEC: int = 25
+        MAX_BODY_BYTES: int = 1_000_000
+        MAX_MESSAGE_CHARS: int = 2000
+
+        RATE_LIMIT_WINDOW_SEC: int = 60
+        RATE_LIMIT_MAX_REQ: int = 60
+
+        @validator("ALLOWED_ORIGINS", pre=True)
+        def _parse_origins(cls, v):
+            if v is None or v == "":
+                return []
+            if isinstance(v, list):
+                return v
+            if isinstance(v, str):
+                s = v.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        import json
+                        parsed = json.loads(s)
+                        if isinstance(parsed, list):
+                            return [str(x).strip() for x in parsed if str(x).strip()]
+                    except Exception:
+                        pass
+                return [s2.strip() for s2 in s.split(",") if s2.strip()]
+            return v
+
+        class Config:
+            env_file = ".env"
+            env_file_encoding = "utf-8"
+            case_sensitive = False
+            extra = "ignore"
