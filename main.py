@@ -15,7 +15,31 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from agents import Agent, Runner, function_tool
+try:
+    from agents import Agent, Runner, function_tool  # type: ignore
+    HAS_AGENTS_SDK = True
+except Exception:  # graceful fallback when Agents SDK is missing
+    HAS_AGENTS_SDK = False
+    def function_tool(fn=None, **kwargs):
+        # Minimal no-op decorator to let tools load without Agents SDK
+        def _decorator(f):
+            # attach a .name attribute similar to agents SDK for consistency
+            setattr(f, "name", kwargs.get("name_override", getattr(f, "__name__", "tool")))
+            return f
+        if fn is None:
+            return _decorator
+        return _decorator(fn)
+
+    class Agent:  # minimal placeholder
+        def __init__(self, *args, **kwargs): 
+            self.name = kwargs.get("name", "agent")
+            self.tools = kwargs.get("tools", [])
+            self.instructions = kwargs.get("instructions", "")
+
+    class Runner:  # minimal placeholder runner: we won't actually use it
+        @staticmethod
+        async def run(agent, input: str, context: dict):
+            raise RuntimeError("Agents SDK not installed; using direct tool dispatch fallback.")
 from config import Settings
 from dataclasses import dataclass, field, asdict
 import constants
@@ -39,6 +63,12 @@ from tools import (
     trendy_phrase,
     ask_llm,
     detect_area_for_pharmacy,
+)
+from tools import RunContextWrapper as _RunCtx
+# 🔹 ΝΕΟ: LLM Router & Booking helpers
+from router_and_booking import (
+    init_session_state,
+    maybe_handle_followup_or_booking,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -212,12 +242,16 @@ INTENT_TOOL_MAP = {
     "OnDutyPharmacyIntent": "pharmacy_lookup_nlp",
     "HospitalIntent": "hospital_duty",
     "PatrasLlmAnswersIntent": "patras_info",
-    "ServicesAndToursIntent": "services_list",
+    "ServicesAndToursIntent": "__internal_services__",
 }
 
 CONTACT_PAT = re.compile(
-    r"(" r"(?:ταξι|taxi|radio\s*taxi|taxi\s*express|taxipatras|ραδιοταξι).*" r"(?:τηλ|τηλέφων|επικοινων|μαιλ|mail|booking|app|εφαρμογ|site|σελίδ|κατέβασ|install)"
-    r"|(?:τηλ|τηλέφων).*(?:ταξι|taxi|taxi\s*express|taxipatras|ραδιοταξι)" r"|(?:\bεφαρμογ(?:ή|η)\b|\bapp\b|\bgoogle\s*play\b|\bapp\s*store\b)" r")",
+    r"("
+    r"(?:ταξι|taxi|radio\s*taxi|taxi\s*express|taxipatras|ραδιοταξι).*"
+    r"(?:τηλ|τηλέφων|επικοινων|μαιλ|mail|booking|app|εφαρμογ|site|σελίδ|κατέβασ|install)"
+    r"|(?:τηλ|τηλέφων).*(?:ταξι|taxi|taxi\s*express|taxipatras|ραδιοταξι)"
+    r"|(?:\bεφαρμογ(?:ή|η)\b|\bapp\b|\bgoogle\s*play\b|\bapp\s*store\b)"
+    r")",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -504,17 +538,19 @@ INTENT_SERVICES = "ServicesAndToursIntent"
 
 FOLLOWUP_BUDGET_DEFAULT = 3
 
+# 🔧 ΤΡΟΠΟΠΟΙΗΘΗΚΕ: αφαιρέθηκε η «αποσκευ(ές|ες)» από TRIP triggers, προστέθηκαν «κοστίζουν/κοστιζουν»
 TRIGGERS = {
     INTENT_TRIP: [
         r"\bδιαδρομ",
         r"\b(κοστ(ίζει|ιζ)|κοστιζει|κόστος|κοστος)\b",
+        r"\b(κοστίζουν|κοστιζουν)\b",   # νέο
         r"\b(ταρ(ί)?φα)\b",
         r"\bστοιχ(ίζει|ιζ|ιζει)\b",
         r"\b(πόσο\s+πάει|πόσο\s+κάνει)\b",
         r"\bαπ[όο].+\b(μέχρι|προς|για)\b",
         r"\b(έως|εως|μέχρι|απ[όο])\b.*\b(διαδρομ|πάω|πάμε|ταξ|κοστος|κόστος|ταρ(ί)?φα|στοιχ)\b",
         r"\bεπιστροφ(ή|η)\b",
-        r"\bαποσκευ(ές|ες)\b",
+        # r"\bαποσκευ(ές|ες)\b",        # αφαιρέθηκε
         r"πόσα\s+χιλιόμετρα",
     ],
     INTENT_HOSPITAL: [
@@ -877,6 +913,11 @@ class SessionState:
     intent: Optional[str] = None
     slots: Dict[str, Any] = field(default_factory=dict)
     budget: int = field(default=FOLLOWUP_BUDGET_DEFAULT)
+    # 🔹 ΝΕΑ πεδία για router/booking/context
+    last_offered: Optional[str] = None
+    pending_trip: Dict[str, Any] = field(default_factory=dict)
+    context_turns: List[str] = field(default_factory=list)
+    booking_slots: Dict[str, Any] = field(default_factory=dict)
 
 
 def _get_state(sid: str) -> "SessionState":
@@ -902,6 +943,14 @@ def _dec_budget(sid: str):
         _clear_state(sid)
     else:
         _save_state(sid, st)
+
+# 🔹 helper για context buffer
+def _push_context(sid: str, user_text: str, reply_text: str):
+    st = _get_state(sid)
+    st.context_turns.append(f"U: {user_text}")
+    st.context_turns.append(f"A: {reply_text}")
+    st.context_turns[:] = st.context_turns[-10:]
+    _save_state(sid, st)
 
 
 # --- Topic drift heuristics ---
@@ -948,7 +997,6 @@ def _decide_intent(sid: str, text: str, predicted_intent: Optional[str], score: 
             if RESET_ON_NO_MATCH:
                 if CONFIRM_RE.search(t):
                     return st.intent
-                # ΠΡΙΝ: γινόταν force PHARMACY αν εντοπιζόταν περιοχή. Αυτό το κόβουμε.
                 _clear_state(sid)
                 return ""
 
@@ -1000,36 +1048,38 @@ def _two_word_cities_to_trip(text: str) -> Optional[str]:
         return f"από {tokens[0]} μέχρι {tokens[1]}"
     return None
 
-def _format_pharmacies(groups: List[Dict[str, str]]) -> str:
-    if not groups:
-        return "❌ Δεν βρέθηκαν εφημερεύοντα."
-    buckets: Dict[str, List[Dict[str, str]]] = {}
-    for p in groups:
-        tr = (p.get("time_range") or "Ώρες μη διαθέσιμες").strip()
-        buckets.setdefault(tr, []).append(p)
-
-    def _start_minutes(s: str) -> int:
-        m = re.search(r"(\d{1,2}):(\d{2})", s or "")
-        return int(m.group(1)) * 60 + int(m.group(2)) if m else 10_000
-
-    lines: List[str] = []
-    for tr in sorted(buckets.keys(), key=_start_minutes):
-        lines.append(f"**{tr}**")
-        for p in buckets[tr]:
-            name = (p.get("name") or "—").strip()
-            addr = (p.get("address") or "—").strip()
-            lines.append(f"{name} — {addr}")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Helper: run tool with timeout
 async def _run_tool_with_timeout(*, tool_input: str, ctx: dict):
-    return await asyncio.wait_for(
-        Runner.run(chat_agent, input=tool_input, context=ctx),
-        timeout=getattr(settings, "TOOL_TIMEOUT_SEC", 25),
-    )
+    """Run a tool either via Agents SDK (if available) or directly by dispatching to our local functions."""
+    if HAS_AGENTS_SDK:
+        return await asyncio.wait_for(
+            Runner.run(chat_agent, input=tool_input, context=ctx),
+            timeout=getattr(settings, "TOOL_TIMEOUT_SEC", 25),
+        )
+    # Fallback: direct dispatch
+    desired = (ctx or {}).get("desired_tool") or "ask_llm"
+    # Map tool names to local callables (already imported at module scope)
+    _registry = {
+        "ask_llm": ask_llm,
+        "trip_quote_nlp": trip_quote_nlp,
+        "trip_estimate": trip_estimate,
+        "pharmacy_lookup": pharmacy_lookup,
+        "pharmacy_lookup_nlp": pharmacy_lookup_nlp,
+        "hospital_duty": hospital_duty,
+        "patras_info": patras_info,
+        "taxi_contact": taxi_contact,
+        "trendy_phrase": trendy_phrase,
+    }
+    fn = _registry.get(desired) or _registry.get("ask_llm")
+    try:
+        if fn is ask_llm:
+            return fn(_RunCtx(context=ctx), tool_input)
+        else:
+            return fn(tool_input)
+    except Exception:
+        logger.exception("Direct tool dispatch failed (fallback)")
+        return UI_TEXT.get("generic_error", "❌ Κάτι πήγε στραβά με το εργαλείο.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1049,12 +1099,33 @@ async def chat_endpoint(
         t_norm = text.lower()
         st = _get_state(sid)
 
+        # 🔹 init νέα πεδία router/booking/context
+        init_session_state(st)
+
         # Hard override για επικοινωνία/app
         if is_contact_intent(t_norm):
-            return {"reply": enrich_reply(_contact_reply(), intent="ContactInfoIntent")}
+            reply = enrich_reply(_contact_reply(), intent="ContactInfoIntent")
+            _push_context(sid, text, reply)
+            return {"reply": reply}
 
-        # ✅ Quick path: επιβεβαίωση «ναι/σωστά/ok» επανατρέχει την τελευταία εκτίμηση ταξιδιού
-        if CONFIRM_RE.search(t_norm) and st.intent == INTENT_TRIP and st.slots.get("last_trip_query"):
+        # 🔹 Router/Booking πρώτος έλεγχος ΠΡΙΝ από τα παλιά quick-confirm/regex
+        handled = maybe_handle_followup_or_booking(st, text)
+        if handled is not None:
+            reply = handled["reply"]
+            reply = enrich_reply(reply)  # απαλό styling
+            _save_state(sid, st)        # ⭐ ΝΕΟ: αποθήκευσε τις αλλαγές του router (BookingIntent, slots κ.λπ.)
+            _push_context(sid, text, reply)
+            return {"reply": reply}
+
+
+        # ✅ ΠΑΛΙΟ Quick path: επιβεβαίωση «ναι/σωστά/ok» επανατρέχει την τελευταία εκτίμηση ταξιδιού
+        #    ΜΟΝΟ αν δεν υπάρχει ενεργή προσφορά από τον router (booking/quote/baggage)
+        if (
+            CONFIRM_RE.search(t_norm)
+            and st.intent == INTENT_TRIP
+            and st.slots.get("last_trip_query")
+            and st.last_offered not in {"booking_confirm", "trip_quote", "baggage_cost_info"}
+        ):
             tool_input = _apply_location_aliases(st.slots["last_trip_query"])
             run_context = {
                 "user_id": body.user_id,
@@ -1069,6 +1140,7 @@ async def chat_endpoint(
             _dec_budget(sid)
             reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=INTENT_TRIP, success=True)
             reply = enrich_reply(reply, intent=INTENT_TRIP)
+            _push_context(sid, text, reply)
             resp = {"reply": reply}
             if map_url:
                 resp["map_url"] = map_url
@@ -1091,7 +1163,9 @@ async def chat_endpoint(
         ui = getattr(constants, "UI_TEXT", {}) or {}
 
         if intent == "" and is_cancel_message(t_norm):
-            return {"reply": enrich_reply("ΟΚ, το αφήνουμε εδώ 🙂 Πες μου τι άλλο θες να κανονίσουμε!")}
+            reply = enrich_reply("ΟΚ, το αφήνουμε εδώ 🙂 Πες μου τι άλλο θες να κανονίσουμε!")
+            _push_context(sid, text, reply)
+            return {"reply": reply}
 
         # Αν δεν αποφασίστηκε intent: πιάσε το μοτίβο “Πάτρα Ιωάννινα” ως TRIP
         if not intent:
@@ -1116,7 +1190,9 @@ async def chat_endpoint(
                     "ask_pharmacy_area",
                     "Για ποια περιοχή να ψάξω εφημερεύον φαρμακείο; π.χ. Πάτρα, Ρίο, Βραχναίικα, Μεσσάτιδα/Οβρυά, Παραλία Πατρών. 😊",
                 )
-                return {"reply": enrich_reply(ask, intent=intent)}
+                reply = enrich_reply(ask, intent=intent)
+                _push_context(sid, text, reply)
+                return {"reply": reply}
 
             try:
                 client = PharmacyClient()
@@ -1126,17 +1202,24 @@ async def chat_endpoint(
                     none_msg = ui.get(
                         "pharmacy_none_for_area", "❌ Δεν βρέθηκαν εφημερεύοντα για {area}. Θες να δοκιμάσουμε άλλη περιοχή?"
                     ).format(area=area)
-                    return {"reply": enrich_reply(none_msg, intent=intent)}
+                    reply = enrich_reply(none_msg, intent=intent)
+                    _push_context(sid, text, reply)
+                    return {"reply": reply}
                 st.slots["area"] = area
                 _save_state(sid, st)
                 _dec_budget(sid)
-                reply = f"**Περιοχή: {area}**\n{_format_pharmacies(items)}"
+                pharm_text = pharmacy_lookup(area=area, method='get')
+                reply = f"**Περιοχή: {area}**\n{pharm_text}"
                 reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent, success=True)
-                return {"reply": enrich_reply(reply, intent=intent)}
+                reply = enrich_reply(reply, intent=intent)
+                _push_context(sid, text, reply)
+                return {"reply": reply}
             except Exception:
                 logger.exception("PharmacyClient call failed")
                 generic = ui.get("generic_error", "❌ Κάτι πήγε στραβά με την αναζήτηση. Θες να δοκιμάσουμε άλλη περιοχή;")
-                return {"reply": enrich_reply(generic, intent=intent)}
+                reply = enrich_reply(generic, intent=intent)
+                _push_context(sid, text, reply)
+                return {"reply": reply}
 
         # --- HOSPITAL ---
         if intent == INTENT_HOSPITAL:
@@ -1159,10 +1242,14 @@ async def chat_endpoint(
                 _dec_budget(sid)
                 out = result.final_output or "❌ Δεν μπόρεσα να φέρω την εφημερία."
                 out = inject_trendy_phrase(out, st=_get_state(sid), intent=intent, success=True)
-                return {"reply": enrich_reply(out, intent=intent)}
+                reply = enrich_reply(out, intent=intent)
+                _push_context(sid, text, reply)
+                return {"reply": reply}
             except Exception:
                 logger.exception("Hospital intent failed")
-                return {"reply": enrich_reply("❌ Δεν κατάφερα να φέρω εφημερεύοντα νοσοκομεία.", intent=intent)}
+                reply = enrich_reply("❌ Δεν κατάφερα να φέρω εφημερεύοντα νοσοκομεία.", intent=intent)
+                _push_context(sid, text, reply)
+                return {"reply": reply}
 
         # --- TRIP COST ---
         if intent == INTENT_TRIP:
@@ -1218,6 +1305,7 @@ async def chat_endpoint(
             _dec_budget(sid)
             reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent, success=True)
             reply = enrich_reply(reply, intent=intent)
+            _push_context(sid, text, reply)
             resp = {"reply": reply}
             if map_url:
                 resp["map_url"] = map_url
@@ -1244,11 +1332,13 @@ async def chat_endpoint(
                         inc = ", ".join((pick.get("includes") or [])[:6]) or "Μεταφορά"
                         msg = enrich_reply(f"✅ Περιλαμβάνει: {inc}", intent=intent)
                         _save_state(sid, st)
+                        _push_context(sid, text, msg)
                         return {"reply": msg}
                     else:
                         exc = ", ".join((pick.get("excludes") or [])[:6]) or "—"
                         msg = enrich_reply(f"❌ Δεν περιλαμβάνει: {exc}", intent=intent)
                         _save_state(sid, st)
+                        _push_context(sid, text, msg)
                         return {"reply": msg}
 
             if re.search(r"(εκδρομ|tours?)", t_norm):
@@ -1259,6 +1349,7 @@ async def chat_endpoint(
                 except Exception:
                     pass
                 _save_state(sid, st)
+                _push_context(sid, text, msg)
                 return {"reply": msg}
 
             if re.search(r"(δελφ|ολυμπ|ναυπακ|γαλαξ)", _nrm(text)):
@@ -1279,6 +1370,7 @@ async def chat_endpoint(
                         msg = inject_trendy_phrase(msg, st=st, intent=intent, success=True)
                     except Exception:
                         pass
+                    _push_context(sid, text, msg)
                     return {"reply": msg}
 
             msg = services_reply(text, st)
@@ -1288,6 +1380,7 @@ async def chat_endpoint(
                 msg = inject_trendy_phrase(msg, st=st, intent=intent, success=True)
             except Exception:
                 pass
+            _push_context(sid, text, msg)
             return {"reply": msg}
 
         # --- INFO / LLM Πάτρας ---
@@ -1303,7 +1396,9 @@ async def chat_endpoint(
             _dec_budget(sid)
             out = result.final_output or "Δεν βρήκα κάτι σχετικό, θες να το ψάξω αλλιώς?"
             out = inject_trendy_phrase(out, st=_get_state(sid), intent=intent, success=True)
-            return {"reply": enrich_reply(out, intent=intent)}
+            reply = enrich_reply(out, intent=intent)
+            _push_context(sid, text, reply)
+            return {"reply": reply}
 
         # 3) Γενικό fallback
         desired_tool = None
@@ -1314,7 +1409,7 @@ async def chat_endpoint(
         elif is_trip_quote(text):
             desired_tool = "trip_quote_nlp"
         elif re.search(r"υπηρεσ|εκδρομ|tour|πακετ", t_norm):
-            desired_tool = "services_list"
+            desired_tool = "__internal_services__"
 
         # Αν μοιάζει με «δύο πόλεις» και δεν έχει triggers για pharmacy/hospital → στείλ’το ως trip
         if desired_tool is None:
@@ -1324,8 +1419,10 @@ async def chat_endpoint(
                 text = tw  # normalize
 
         if desired_tool == "taxi_contact":
-            return {"reply": enrich_reply(_contact_reply(), intent="ContactInfoIntent")}
-        if desired_tool == "services_list":
+            reply = enrich_reply(_contact_reply(), intent="ContactInfoIntent")
+            _push_context(sid, text, reply)
+            return {"reply": reply}
+        if desired_tool == "__internal_services__":
             _dec_budget(sid)
             st = _get_state(sid)
             msg = services_reply(text, st)
@@ -1335,6 +1432,7 @@ async def chat_endpoint(
                 msg = inject_trendy_phrase(msg, st=st, intent=INTENT_SERVICES, success=True)
             except Exception:
                 pass
+            _push_context(sid, text, msg)
             return {"reply": msg}
 
         if desired_tool == "trip_quote_nlp":
@@ -1371,6 +1469,7 @@ async def chat_endpoint(
             reply, map_url = strip_map_link(reply_raw)
             reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=INTENT_TRIP, success=True)
             reply = enrich_reply(reply, intent=INTENT_TRIP)
+            _push_context(sid, text, reply)
             resp = {"reply": reply}
             if map_url:
                 resp["map_url"] = map_url
@@ -1390,6 +1489,7 @@ async def chat_endpoint(
         reply, map_url = strip_map_link(reply_raw)
         reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent or "", success=True)
         reply = enrich_reply(reply)
+        _push_context(sid, text, reply)
         resp = {"reply": reply}
         if map_url:
             resp["map_url"] = map_url

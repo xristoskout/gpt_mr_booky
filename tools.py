@@ -1,7 +1,7 @@
 # file: tools.py
 from __future__ import annotations
 
-import os
+import os, requests
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,7 +9,19 @@ from typing import Any, Dict, List, Optional, Tuple
 import unicodedata
 from urllib.parse import quote_plus
 
-from agents import function_tool, RunContextWrapper  # Agents SDK types
+try:
+    from agents import function_tool, RunContextWrapper  # type: ignore
+except Exception:  # graceful fallback if Agents SDK missing
+    def function_tool(fn=None, **kwargs):
+        def _decorator(f):
+            setattr(f, "name", kwargs.get("name_override", getattr(f, "__name__", "tool")))
+            return f
+        if fn is None:
+            return _decorator
+        return _decorator(fn)
+    class RunContextWrapper:  # minimal placeholder to satisfy type hints
+        def __init__(self, context=None, **kwargs):
+            self.context = context or {}
 from unicodedata import normalize as _u_norm
 
 try:
@@ -646,3 +658,36 @@ def detect_area_for_pharmacy(message: str):
         return _area_from_text(message)
     except Exception:
         return None
+
+def notify_booking_slack(payload: dict) -> bool:
+    """Στέλνει κράτηση σε Slack Incoming Webhook. Ρύθμισε SLACK_BOOKING_WEBHOOK_URL στο .env"""
+    url = os.getenv("SLACK_BOOKING_WEBHOOK_URL")
+    if not url:
+        return False
+    text = (
+        "*ΝΕΑ ΚΡΑΤΗΣΗ*\n"
+        f"Κωδικός: {payload.get('code','-')}\n"
+        f"Από: {payload.get('origin','-')}\n"
+        f"Προς: {payload.get('destination','-')}\n"
+        f"Ώρα: {payload.get('pickup_time','-')}\n"
+        f"Όνομα: {payload.get('name','-')}\n"
+        f"Τηλ.: {payload.get('phone','-')}\n"
+        f"Άτομα: {payload.get('pax','-')}\n"
+        f"Αποσκευές: {payload.get('luggage_count','0')} (βαριές: {payload.get('luggage_heavy','όχι')})\n"
+        f"Σχόλια: {payload.get('notes','-')}\n"
+    )
+    try:
+        r = requests.post(url, json={"text": text}, timeout=5)
+        return r.status_code < 300
+    except Exception:
+        return False
+
+def geocode_osm(q: str) -> tuple[float, float]:
+    r = requests.get("https://nominatim.openstreetmap.org/search",
+        params={"q": q, "format":"jsonv2", "limit": 1},
+        headers={"User-Agent":"MrBooky/1.0 (+taxi)"}, timeout=8)
+    r.raise_for_status()
+    j = r.json()
+    if not j:
+        raise ValueError(f"Not found: {q}")
+    return float(j[0]["lat"]), float(j[0]["lon"])        
