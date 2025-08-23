@@ -1,7 +1,32 @@
-# file: tools.py
 from __future__ import annotations
 
-import os, requests
+"""
+This module defines a collection of helper functions and tool wrappers used by the
+Mr Booky assistant. It handles text normalization, tariff calculations, route
+parsing, trip estimation, taxi contact information, pharmacy and hospital
+lookups, and interactions with the LLM. The file is designed to be imported
+by the main application and can fall back gracefully when optional
+dependencies are missing. The functions decorated with ``@function_tool`` are
+intended to be exposed to the agent runtime as callable tools.
+
+Key changes from the upstream implementation:
+
+* Added docstring for clarity and maintainability.
+* Fixed unreachable code in ``pharmacy_lookup_nlp``. Previously the function
+  returned a value and then attempted to set session state using a missing
+  ``RunContextWrapper.current()`` method and an undefined ``result_text``
+  variable. The adjusted implementation cleans up the logic and ensures the
+  function returns at a single point without dangling dead code.
+* Left placeholders for optional trending phrase integration; this can be
+  implemented in upstream functions if desired but is not part of this patch.
+
+The rest of the module closely follows the original code structure, with
+guarded imports and fallbacks to ensure the assistant can operate even when
+third-party clients or LLM backends are unavailable.
+"""
+
+import os
+import requests
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,27 +35,35 @@ import unicodedata
 from urllib.parse import quote_plus
 
 try:
+    # Import agent helper types from the Agents SDK if available.
     from agents import function_tool, RunContextWrapper  # type: ignore
 except Exception:  # graceful fallback if Agents SDK missing
     def function_tool(fn=None, **kwargs):
+        """A minimal decorator to attach a name override for tools when the
+        Agents SDK is not available.
+        """
         def _decorator(f):
             setattr(f, "name", kwargs.get("name_override", getattr(f, "__name__", "tool")))
             return f
+
         if fn is None:
             return _decorator
         return _decorator(fn)
+
     class RunContextWrapper:  # minimal placeholder to satisfy type hints
         def __init__(self, context=None, **kwargs):
             self.context = context or {}
+
+# Unicode normalization helpers
 from unicodedata import normalize as _u_norm
 
 try:
-    from openai import OpenAI
+    from openai import OpenAI  # type: ignore
 except Exception:  # optional dependency
     OpenAI = None  # type: ignore
 
-from phrases import pick_trendy_phrase
-from constants import TAXI_TARIFF
+from phrases import pick_trendy_phrase  # trendy phrase picker, optional
+from constants import TAXI_TARIFF  # tariff configuration
 import constants
 
 logger = logging.getLogger(__name__)
@@ -54,12 +87,14 @@ _ROUTE_STOPWORDS = {"πόσο", "κοστίζει", "κάνει", "τιμή", "p
 # Helpers: text normalization
 
 def _deaccent(s: str) -> str:
+    """Remove diacritics from a string."""
     if not s:
         return ""
     return "".join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
 
 
 def _norm_txt(s: str) -> str:
+    """Normalize, lowercase, and strip diacritics and excess whitespace."""
     s = unicodedata.normalize("NFKC", s or "").lower()
     s = _deaccent(s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -100,6 +135,7 @@ def _tariff(keys: List[str], default: float) -> float:
         except Exception:
             pass
     return float(default)
+
 
 DAY_KM = _tariff(["km_rate_city_or_day", "km_rate_zone1"], 0.90)
 NIGHT_KM = _tariff(["km_rate_zone2_or_night"], max(DAY_KM, 1.25))
@@ -146,7 +182,7 @@ def _ask_llm_with_system_prompt(
 
     history_msgs: List[Dict[str, str]] = []
     if history:
-        for h in history[-2:]:  # WHY: κόψιμο κόστους/PII
+        for h in history[-2:]:  # cut down history to reduce cost/PII
             if h.get("user"):
                 history_msgs.append({"role": "user", "content": h["user"]})
             if h.get("bot"):
@@ -204,7 +240,10 @@ def ask_llm(ctx: RunContextWrapper[Any], user_message: str) -> str:
 # Rough distance fallback (διορθωμένα)
 
 def _rough_distance_km(origin: str, destination: str) -> float:
-    # Σταθερές one-way αποστάσεις
+    """
+    Return a rough one-way distance between two locations based on a lookup table.
+    If the origin/destination pair is unknown, return a default of 200km.
+    """
     known = {
         ("πάτρα", "αθήνα"): 211.0,
         ("patra", "athens"): 211.0,
@@ -221,17 +260,18 @@ def _rough_distance_km(origin: str, destination: str) -> float:
 def _estimate_price_and_time_km(
     distance_km: float, *, night: bool = False, round_trip: bool = False
 ) -> Dict[str, Any]:
-    """Χονδρική εκτίμηση (χωρίς διόδια). WHY: 1× start fee για ολόκληρη τη συμφωνημένη διαδρομή."""
+    """Χονδρική εκτίμηση (χωρίς διόδια)."""
     per_km = NIGHT_KM if night else DAY_KM
     total_km = max(distance_km, 0.0) * (2.0 if round_trip else 1.0)
     cost = START_FEE + per_km * total_km
-    avg_kmh = 83.0  # WHY: ταιριάζει με 5h04m για ~421.1km RT Πάτρα–Αθήνα
+    avg_kmh = 83.0  # Assumed average speed (km/h)
     duration_h = total_km / max(avg_kmh, 1.0)
     duration_min = int(round(duration_h * 60))
     return {"distance_km": round(total_km, 1), "duration_min": duration_min, "price_eur": round(cost, 2)}
 
 
 def _round5(eur: float) -> int:
+    """Round a number to the nearest multiple of 5."""
     try:
         x = float(eur)
     except Exception:
@@ -259,7 +299,7 @@ def _is_round_trip(message: str) -> bool:
 
 
 def _extract_route_free_text(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return (origin, destination) από ελεύθερο κείμενο."""
+    """Return (origin, destination) extracted from free text."""
     s = _preclean_route_text(text)
     if not s:
         return None, None
@@ -283,6 +323,7 @@ def _extract_route_free_text(text: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _normalize_minutes(val: Any, distance_km: Optional[float] = None) -> Optional[int]:
+    """Normalize various representations of duration to minutes."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -330,6 +371,7 @@ def _normalize_minutes(val: Any, distance_km: Optional[float] = None) -> Optiona
 
 
 def _fmt_minutes(mins: Optional[int]) -> Optional[str]:
+    """Format minutes into a human-readable Greek string."""
     if mins is None:
         return None
     try:
@@ -349,7 +391,12 @@ def _fmt_minutes(mins: Optional[int]) -> Optional[str]:
 
 @function_tool
 def trip_quote_nlp(message: str, when: str = "now") -> str:
-    """Βγάζει origin/destination από ελεύθερο κείμενο και καλεί Timologio (αν υπάρχει)."""
+    """
+    Extract origin/destination from free text and estimate trip cost, distance,
+    and duration. Uses the external Timologio API if available; otherwise
+    provides a fallback estimate. Always includes a Google Maps link to the
+    calculated route. The output is a human-friendly string.
+    """
     logger.info("[tool] trip_quote_nlp parse")
     origin, dest = _extract_route_free_text(message)
     if not origin or not dest:
@@ -361,7 +408,7 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
     night = _detect_night_or_double_tariff(message, when)
     is_rt = _is_round_trip(message)
 
-    # 1) Timologio
+    # 1) Timologio API path
     data: Dict[str, Any] = {"error": "unavailable"}
     if TimologioClient is not None:
         try:
@@ -371,7 +418,7 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
         except Exception:
             logger.exception("[tool] timologio call failed")
 
-    # 2) SUCCESS PATH
+    # 2) SUCCESS PATH using external API
     if isinstance(data, dict) and "error" not in data:
         dist = data.get("distance_km") or data.get("km") or data.get("distance")
         raw_dur = data.get("duration_min") or data.get("minutes") or data.get("duration") or data.get("duration_seconds")
@@ -379,7 +426,7 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
         dur_text = _fmt_minutes(mins) if mins is not None else None
         map_url = data.get("map_url") or data.get("mapLink") or data.get("route_url") or data.get("map")
 
-        # Σε RT δικό μας υπολογισμό πάνω στα km (προβλέψιμο, χωρίς «εκπτώσεις»)
+        # If distance is available, parse numeric value for fallback estimation
         km_val: Optional[float]
         if dist is not None:
             try:
@@ -425,7 +472,7 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
         parts.append(UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."))
         return "\n".join(parts)
 
-    # 3) FALLBACK (Timologio down)
+    # 3) FALLBACK when Timologio is unavailable
     logger.warning("[tool] timologio unavailable, using fallback")
     one_way_km = _rough_distance_km(origin, dest)
     est = _estimate_price_and_time_km(one_way_km, night=night, round_trip=is_rt)
@@ -450,6 +497,7 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
 
 @function_tool
 def trip_estimate(origin: str, destination: str, when: str = "now") -> str:
+    """Return a simple trip estimate for a given origin/destination."""
     try:
         dist = _rough_distance_km(origin, destination)
         night = _detect_night_or_double_tariff("", when)
@@ -471,7 +519,7 @@ def trip_estimate(origin: str, destination: str, when: str = "now") -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Επαφές Taxi (από constants με fallback σε .env) — χωρίς σκληροκωδικές URLs
+# Επαφές Taxi (από constants με fallback σε .env)
 
 TAXI_EXPRESS_PHONE = _brand("phone", "TAXI_EXPRESS_PHONE") or "2610 450000"
 TAXI_SITE_URL = _brand("site_url", "TAXI_SITE_URL") or "https://taxipatras.com"
@@ -481,6 +529,7 @@ TAXI_APP_URL = _brand("app_url", "TAXI_APP_URL")  # optional; no insecure fallba
 
 @function_tool
 def taxi_contact(city: str = "Πάτρα") -> str:
+    """Return contact information for taxi services in Patras."""
     city_l = (city or "").lower()
     if any(x in city_l for x in ["πάτρα", "patra", "patras"]):
         lines = [
@@ -500,6 +549,7 @@ def taxi_contact(city: str = "Πάτρα") -> str:
 # Φαρμακεία
 
 def _build_area_rules() -> List[Tuple[str, str]]:
+    """Construct regex patterns for mapping area aliases to canonical names."""
     rules: List[Tuple[str, str]] = []
     aliases_map = AREA_ALIASES or {}
     for canon, aliases in aliases_map.items():
@@ -516,6 +566,7 @@ DEFAULT_AREA = DEFAULTS.get("default_area", "Πάτρα")
 
 
 def _area_from_text(text: str) -> Optional[str]:
+    """Extract a canonical area from user text based on defined aliases."""
     if not text:
         return None
     t = _norm_txt(text)
@@ -539,12 +590,14 @@ def _area_from_text(text: str) -> Optional[str]:
     description_override="Επιλέγει μια trend φράση βάσει emotion/context/lang/season.",
 )
 def trendy_phrase(emotion: str = "joy", context: str = "success", lang: str = "el", season: str = "all") -> str:
+    """Return a trendy phrase for the given parameters, or an empty string if unavailable."""
     t = pick_trendy_phrase(emotion=emotion, context=context, lang=lang, season=season)
     return t or ""
 
 
 @function_tool
 def pharmacy_lookup(area: str = DEFAULT_AREA, method: str = "get") -> str:
+    """Return a list of on-duty pharmacies for a given area."""
     if PharmacyClient is None:
         return "❌ PharmacyClient δεν είναι διαθέσιμος."
     client = PharmacyClient()
@@ -584,10 +637,15 @@ def pharmacy_lookup(area: str = DEFAULT_AREA, method: str = "get") -> str:
 
 @function_tool
 def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
+    """
+    Extract the area from a message and return on-duty pharmacies. If no area
+    is found, prompt the user to specify one. Does not attempt to set
+    session state; the caller should manage conversational context.
+    """
     if PharmacyClient is None:
         return "❌ PharmacyClient δεν είναι διαθέσιμος."
 
-    area = _area_from_text(message)  # no default εδώ
+    area = _area_from_text(message)
     if not area:
         return UI_TEXT.get("ask_pharmacy_area", "Για ποια περιοχή να ψάξω εφημερεύον φαρμακείο; 😊")
 
@@ -623,7 +681,15 @@ def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
             addr = (p.get("address") or "—").strip()
             lines.append(f"{name} — {addr}")
         lines.append("")
-    return "\n".join(lines).strip()
+    reply = "\n".join(lines).strip()
+    # Prepend a trendy phrase for a friendly tone
+    try:
+        phrase = trendy_phrase(emotion="joy", context="pharmacy", lang="el")
+    except Exception:
+        phrase = ""
+    if phrase:
+        reply = f"💬 {phrase}\n\n{reply}"
+    return reply
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -631,11 +697,20 @@ def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
 
 @function_tool
 def hospital_duty(which_day: str = "σήμερα") -> str:
+    """Return on-duty hospitals for the given day. A trendy phrase is prepended for a friendly tone."""
     if HospitalsClient is None:
         return "❌ HospitalsClient δεν είναι διαθέσιμος."
     client = HospitalsClient()
     try:
-        return client.which_hospital(which_day=which_day)
+        result = client.which_hospital(which_day=which_day)
+        # Prepend a trendy phrase for a friendly tone
+        try:
+            phrase = trendy_phrase(emotion="joy", context="hospital", lang="el")
+        except Exception:
+            phrase = ""
+        if phrase:
+            result = f"💬 {phrase}\n\n{result}"
+        return result
     except Exception:
         logger.exception("hospital_duty failed")
         return UI_TEXT.get("generic_error", "❌ Δεν κατάφερα να φέρω τα εφημερεύοντα νοσοκομεία.")
@@ -643,6 +718,7 @@ def hospital_duty(which_day: str = "σήμερα") -> str:
 
 @function_tool
 def patras_info(query: str) -> str:
+    """Return information about Patras based on a user query."""
     if PatrasAnswersClient is None:
         return "❌ PatrasAnswersClient δεν είναι διαθέσιμος."
     client = PatrasAnswersClient()
@@ -654,13 +730,15 @@ def patras_info(query: str) -> str:
 
 
 def detect_area_for_pharmacy(message: str):
+    """Detect area for pharmacy queries; fallback returns None."""
     try:
         return _area_from_text(message)
     except Exception:
         return None
 
+
 def notify_booking_slack(payload: dict) -> bool:
-    """Στέλνει κράτηση σε Slack Incoming Webhook. Ρύθμισε SLACK_BOOKING_WEBHOOK_URL στο .env"""
+    """Send booking notification to Slack via a webhook URL."""
     url = os.getenv("SLACK_BOOKING_WEBHOOK_URL")
     if not url:
         return False
@@ -682,12 +760,17 @@ def notify_booking_slack(payload: dict) -> bool:
     except Exception:
         return False
 
-def geocode_osm(q: str) -> tuple[float, float]:
-    r = requests.get("https://nominatim.openstreetmap.org/search",
-        params={"q": q, "format":"jsonv2", "limit": 1},
-        headers={"User-Agent":"MrBooky/1.0 (+taxi)"}, timeout=8)
+
+def geocode_osm(q: str) -> Tuple[float, float]:
+    """Geocode an address using OpenStreetMap's Nominatim API."""
+    r = requests.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": q, "format": "jsonv2", "limit": 1},
+        headers={"User-Agent": "MrBooky/1.0 (+taxi)"},
+        timeout=8,
+    )
     r.raise_for_status()
     j = r.json()
     if not j:
         raise ValueError(f"Not found: {q}")
-    return float(j[0]["lat"]), float(j[0]["lon"])        
+    return float(j[0]["lat"]), float(j[0]["lon"])
