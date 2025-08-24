@@ -1211,15 +1211,32 @@ async def chat_endpoint(
                 _save_state(sid, st)
                 _dec_budget(sid)
 
-                # Κάλεσε το εργαλείο αν είναι callable, αλλιώς χρησιμοποίησε το NLP εργαλείο
+                # Κάλεσε το εργαλείο αν είναι callable. Αν είναι FunctionTool, αναζήτησε την υποκείμενη συνάρτηση.
                 try:
                     if callable(pharmacy_lookup):
                         pharm_text = pharmacy_lookup(area=area, method="get")
                     else:
-                        pharm_text = pharmacy_lookup_nlp(message=area, method="get")
+                        # ψάξε την υποκείμενη συνάρτηση του pharmacy_lookup (func/_func/fn)
+                        underlying = getattr(pharmacy_lookup, "func", None) or getattr(pharmacy_lookup, "_func", None) or getattr(pharmacy_lookup, "fn", None)
+                        if underlying and callable(underlying):
+                            pharm_text = underlying(area=area, method="get")
+                        else:
+                            # Πάμε στο NLP εργαλείο, πάλι ελέγχοντας αν είναι FunctionTool
+                            underlying_nlp = getattr(pharmacy_lookup_nlp, "func", None) or getattr(pharmacy_lookup_nlp, "_func", None) or getattr(pharmacy_lookup_nlp, "fn", None)
+                            if underlying_nlp and callable(underlying_nlp):
+                                pharm_text = underlying_nlp(message=area, method="get")
+                            else:
+                                pharm_text = pharmacy_lookup_nlp(message=area, method="get")
                 except Exception:
-                    # τελική εναλλακτική: NLP εργαλείο
-                    pharm_text = pharmacy_lookup_nlp(message=area, method="get")
+                    # Τελική εναλλακτική: NLP εργαλείο με υποκείμενη συνάρτηση αν υπάρχει
+                    try:
+                        underlying_nlp = getattr(pharmacy_lookup_nlp, "func", None) or getattr(pharmacy_lookup_nlp, "_func", None) or getattr(pharmacy_lookup_nlp, "fn", None)
+                        if underlying_nlp and callable(underlying_nlp):
+                            pharm_text = underlying_nlp(message=area, method="get")
+                        else:
+                            pharm_text = pharmacy_lookup_nlp(message=area, method="get")
+                    except Exception:
+                        pharm_text = UI_TEXT.get("generic_error", "❌ Δεν κατάφερα να φέρω εφημερεύοντα φαρμακεία.")
 
                 reply = f"**Περιοχή: {area}**\n{pharm_text}"
                 reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent, success=True)
