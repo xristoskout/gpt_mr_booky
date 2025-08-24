@@ -774,3 +774,25 @@ def geocode_osm(q: str) -> Tuple[float, float]:
     if not j:
         raise ValueError(f"Not found: {q}")
     return float(j[0]["lat"]), float(j[0]["lon"])
+
+# -----------------------------------------------------------------------------
+# Make decorated tools callable when imported directly
+#
+# When the Agents SDK is available, the @function_tool decorator wraps functions
+# in FunctionTool objects that are not directly callable. This causes errors
+# when code expects to call the original function (e.g. pharmacy_lookup(area=…)).
+# To maintain backwards compatibility, detect this case for selected tools and attach
+# a __call__ method that delegates to the underlying implementation (if any).
+try:
+    for _name in ("pharmacy_lookup", "pharmacy_lookup_nlp", "hospital_duty"):
+        _obj = globals().get(_name)
+        if _obj is not None and not callable(_obj):
+            # Try common attribute names that hold the original function
+            underlying = getattr(_obj, "func", None) or getattr(_obj, "_func", None) or getattr(_obj, "fn", None)
+            if underlying and callable(underlying):
+                # Define a wrapper that forwards calls to the original function
+                def _make_call(u):
+                    return lambda *a, **kw: u(*a, **kw)
+                setattr(_obj, "__call__", _make_call(underlying))  # type: ignore
+except Exception:
+    pass

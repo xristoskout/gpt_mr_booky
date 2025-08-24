@@ -1179,7 +1179,7 @@ async def chat_endpoint(
 
         # 2) Intent-specific
 
-        # --- PHARMACY ---
+        # --- PHARMACY --- 
         if intent == INTENT_PHARMACY:
             st = _get_state(sid)
             area = detect_area_for_pharmacy(text) or st.slots.get("area")
@@ -1200,26 +1200,43 @@ async def chat_endpoint(
                 items = data if isinstance(data, list) else data.get("pharmacies", [])
                 if not items:
                     none_msg = ui.get(
-                        "pharmacy_none_for_area", "❌ Δεν βρέθηκαν εφημερεύοντα για {area}. Θες να δοκιμάσουμε άλλη περιοχή?"
+                        "pharmacy_none_for_area",
+                        "❌ Δεν βρέθηκαν εφημερεύοντα για {area}. Θες να δοκιμάσουμε άλλη περιοχή?"
                     ).format(area=area)
                     reply = enrich_reply(none_msg, intent=intent)
                     _push_context(sid, text, reply)
                     return {"reply": reply}
+
                 st.slots["area"] = area
                 _save_state(sid, st)
                 _dec_budget(sid)
-                pharm_text = pharmacy_lookup(area=area, method='get')
+
+                # Κάλεσε το εργαλείο αν είναι callable, αλλιώς χρησιμοποίησε το NLP εργαλείο
+                try:
+                    if callable(pharmacy_lookup):
+                        pharm_text = pharmacy_lookup(area=area, method="get")
+                    else:
+                        pharm_text = pharmacy_lookup_nlp(message=area, method="get")
+                except Exception:
+                    # τελική εναλλακτική: NLP εργαλείο
+                    pharm_text = pharmacy_lookup_nlp(message=area, method="get")
+
                 reply = f"**Περιοχή: {area}**\n{pharm_text}"
                 reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent, success=True)
                 reply = enrich_reply(reply, intent=intent)
                 _push_context(sid, text, reply)
                 return {"reply": reply}
+
             except Exception:
                 logger.exception("PharmacyClient call failed")
-                generic = ui.get("generic_error", "❌ Κάτι πήγε στραβά με την αναζήτηση. Θες να δοκιμάσουμε άλλη περιοχή;")
+                generic = ui.get(
+                    "generic_error",
+                    "❌ Κάτι πήγε στραβά με την αναζήτηση. Θες να δοκιμάσουμε άλλη περιοχή;"
+                )
                 reply = enrich_reply(generic, intent=intent)
                 _push_context(sid, text, reply)
                 return {"reply": reply}
+
 
         # --- HOSPITAL ---
         if intent == INTENT_HOSPITAL:

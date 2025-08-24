@@ -789,13 +789,14 @@ def maybe_handle_followup_or_booking(st: Any, user_text: str) -> Optional[Dict[s
     if booking_intent and st.intent != "BookingIntent":
         return booking_start(st, reset=True, source_text=txt)
 
-    # E) Συνεχόμενο booking: συμπλήρωσε μόνο αν λείπουν πεδία. Αν όλα τα απαραίτητα έχουν συμπληρωθεί, μην κλειδώνεις τον χρήστη.
+    # E) Συνεχόμενο booking: Συμπληρώνουμε μόνο όσα λείπουν. Αν όλα τα
+    # απαραίτητα πεδία έχουν συμπληρωθεί, δεν "κλειδώνουμε" τον χρήστη
+    # στο booking flow αλλά αφήνουμε το routing να συνεχίσει.
     if st.intent == "BookingIntent":
-        # Αν λείπουν πεδία, συνέχισε να τα ζητάς
-        if any(v in (None, "") for v in st.booking_slots.get(k) for k in BOOKING_REQUIRED if st.booking_slots.get(k) == ""):
+        # Αν λείπει κάποιο υποχρεωτικό πεδίο, ζήτα το
+        if any(st.booking_slots.get(k) in (None, "") for k in BOOKING_REQUIRED):
             return booking_collect(st, txt)
-        # Αν δεν λείπουν πεδία, άφησε τον main να δρομολογήσει το μήνυμα σε άλλο intent
-        # (ο χρήστης ίσως θέλει να ρωτήσει κάτι άλλο)
+        # Διαφορετικά, δεν κάνουμε τίποτα εδώ ώστε να χειριστεί το LLM το μήνυμα
 
     # F) Γρήγορο baggage χωρίς LLM
     if re.search(r"αποσκευ|βαλίτσ|βαλιτσ", txt, re.IGNORECASE):
