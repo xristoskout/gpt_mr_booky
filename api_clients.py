@@ -3,7 +3,8 @@ import logging
 import re
 from typing import Any, Dict, Optional
 import requests
-from requests.adapters import HTTPAdapter, Retry
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -73,24 +74,34 @@ class BaseClient:
 
 class PharmacyClient(BaseClient):
     def __init__(self):
-        # support both *_URL and *_BASE env names
-        super().__init__("PHARMACY_API_URL", default_path="on_duty", alt_env=("PHARMACY_API_BASE",))
+        # Πλέον default_path = "pharmacy" (όχι "on_duty")
+        super().__init__("PHARMACY_API_URL", default_path="pharmacy", alt_env=("PHARMACY_API_BASE",))
 
-    def get_on_duty(self, area: str = "Πάτρα", method: str = "get"):
-        last_err = None
-        for path in ("on_duty", "pharmacy"):
-            try:
-                if method.lower() == "get":
-                    return self._get({"area": area}, path=path)
-                elif method.lower() == "post":
-                    return self._post({"area": area}, path=path)
-                else:
-                    raise ValueError("Invalid method. Use 'get' or 'post'.")
-            except Exception as e:
-                last_err = e
-                continue
-        if last_err:
-            raise last_err
+    def get_on_duty(self, area: str = "Πάτρα", method: str = "get") -> Dict[str, Any]:
+        """
+        Καλεί ΜΟΝΟ /pharmacy (GET ή POST) και επιστρέφει ενιαίο dict:
+        { "area": "<περιοχή>", "pharmacies": [ {name, address, time_range}, ... ] }
+        """
+        area = (area or "Πάτρα").strip()
+        try:
+            if method.lower() == "post":
+                data = self._post({"area": area}, path="pharmacy")
+            else:
+                data = self._get({"area": area}, path="pharmacy")
+
+            # Ομογενοποίηση απάντησης
+            if isinstance(data, list):
+                pharmacies = data
+            elif isinstance(data, dict):
+                pharmacies = data.get("pharmacies", [])
+            else:
+                pharmacies = []
+
+            return {"area": area, "pharmacies": pharmacies}
+
+        except Exception:
+            logger.exception("PharmacyClient.get_on_duty failed")
+            return {"area": area, "pharmacies": []}
 
 # ===================== HOSPITALS =====================
 

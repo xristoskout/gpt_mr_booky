@@ -220,7 +220,10 @@ chat_agent = Agent(
     name="customer_support_agent",
     instructions=(
         "Είσαι ο Mr Booky ,ένας ζεστός, χιουμοριστικός agent εξυπηρέτησης πελατών του Taxi Express Patras. "
-        "Απάντα στα ελληνικά. "
+        "Απάντα στα ελληνικά, χρησιμοποιώντας φυσικές, πλήρεις προτάσεις. "
+        "Μην συλλαβίζεις, μην προφέρεις λέξεις γράμμα-γράμμα, και απέφυγε τεχνικές περιγραφές. "
+        "Η απάντηση πρέπει να είναι έτοιμη για προφορική εκφώνηση (text-to-speech), σαν να μιλάς σε τηλέφωνο. "
+        "Χρησιμοποίησε απλή, καθημερινή γλώσσα."
         "Αν στο context υπάρχει `desired_tool`, προσπάθησε πρώτα να καλέσεις αυτό το εργαλείο. "
         "Για κόστος/χρόνο διαδρομών: trip_quote_nlp. "
         "Για φαρμακεία: pharmacy_lookup / pharmacy_lookup_nlp. "
@@ -282,6 +285,39 @@ def is_trip_quote(text: str) -> bool:
     if re.search(r"πόσο\s+(?:κοστίζει|κάνει|πάει)\s+", t):
         return True
     return False
+
+
+# --- render helpers για φαρμακεία ---
+def _render_pharmacies_text(items: list[dict], area: str) -> str:
+    if not items:
+        return f"❌ Δεν βρέθηκαν εφημερεύοντα για {area}."
+
+    # Ομαδοποίηση ανά time_range και ταξινόμηση κατά ώρα έναρξης αν υπάρχει
+    groups: dict[str, list[dict]] = {}
+    for it in items:
+        zone = (it.get("time_range") or "—").strip()
+        groups.setdefault(zone, []).append(it)
+
+    def _zone_key(z: str) -> int:
+        m = re.match(r"(\d{1,2})[:.](\d{2})", z)
+        if not m:
+            return 99999
+        return int(m.group(1)) * 60 + int(m.group(2))
+
+    ordered = sorted(groups.items(), key=lambda kv: _zone_key(kv[0]))
+
+    lines: list[str] = []
+    for zone, lst in ordered:
+        if zone and zone != "—":
+            lines.append(f"🕘 {zone}")
+        for p in lst:
+            name = (p.get("name") or "Φαρμακείο").strip()
+            addr = (p.get("address") or "").strip()
+            lines.append(f"• {name}" + (f" — {addr}" if addr else ""))
+        lines.append("")
+    # καθάρισμα κενών γραμμών στο τέλος
+    out = "\n".join([ln for ln in lines if ln.strip()])
+    return out
 
 
 PHARMACY_RE = re.compile(r"\b(φαρμακ|εφημερ)\b", re.IGNORECASE)
@@ -1179,10 +1215,12 @@ async def chat_endpoint(
 
         # 2) Intent-specific
 
-        # --- PHARMACY --- 
+        # --- PHARMACY ---
         if intent == INTENT_PHARMACY:
             st = _get_state(sid)
             area = detect_area_for_pharmacy(text) or st.slots.get("area")
+            ui = getattr(constants, "UI_TEXT", {}) or {}
+
             if not area:
                 st.slots["area"] = None
                 _save_state(sid, st)
@@ -1196,8 +1234,9 @@ async def chat_endpoint(
 
             try:
                 client = PharmacyClient()
-                data = client.get_on_duty(area=area, method="get")
-                items = data if isinstance(data, list) else data.get("pharmacies", [])
+                resp = client.get_on_duty(area=area)  # μόνο /pharmacy πλέον
+                items = (resp or {}).get("pharmacies", [])
+
                 if not items:
                     none_msg = ui.get(
                         "pharmacy_none_for_area",
@@ -1207,39 +1246,26 @@ async def chat_endpoint(
                     _push_context(sid, text, reply)
                     return {"reply": reply}
 
+                # --- ΑΠΛΟ SESSION CACHE ΣΕ ΕΠΙΠΕΔΟ TEXT ---
+                cached: dict = st.slots.get("cached_pharmacy", {})
+                if isinstance(cached, dict) and area in cached:
+                    logger.info(f"✅ Returning cached pharmacy info for {area}")
+                    pharm_text = cached[area]
+                else:
+                    logger.info(f"🔄 No cache hit for {area} — rendering from API items")
+                    pharm_text = _render_pharmacies_text(items, area)
+                    # cache μόνο αν δεν είναι error
+                    if "Δεν βρέθηκαν" not in pharm_text:
+                        cached[area] = pharm_text
+                        st.slots["cached_pharmacy"] = cached
+
                 st.slots["area"] = area
                 _save_state(sid, st)
                 _dec_budget(sid)
 
-                # Κάλεσε το εργαλείο αν είναι callable. Αν είναι FunctionTool, αναζήτησε την υποκείμενη συνάρτηση.
-                try:
-                    if callable(pharmacy_lookup):
-                        pharm_text = pharmacy_lookup(area=area, method="get")
-                    else:
-                        # ψάξε την υποκείμενη συνάρτηση του pharmacy_lookup (func/_func/fn)
-                        underlying = getattr(pharmacy_lookup, "func", None) or getattr(pharmacy_lookup, "_func", None) or getattr(pharmacy_lookup, "fn", None)
-                        if underlying and callable(underlying):
-                            pharm_text = underlying(area=area, method="get")
-                        else:
-                            # Πάμε στο NLP εργαλείο, πάλι ελέγχοντας αν είναι FunctionTool
-                            underlying_nlp = getattr(pharmacy_lookup_nlp, "func", None) or getattr(pharmacy_lookup_nlp, "_func", None) or getattr(pharmacy_lookup_nlp, "fn", None)
-                            if underlying_nlp and callable(underlying_nlp):
-                                pharm_text = underlying_nlp(message=area, method="get")
-                            else:
-                                pharm_text = pharmacy_lookup_nlp(message=area, method="get")
-                except Exception:
-                    # Τελική εναλλακτική: NLP εργαλείο με υποκείμενη συνάρτηση αν υπάρχει
-                    try:
-                        underlying_nlp = getattr(pharmacy_lookup_nlp, "func", None) or getattr(pharmacy_lookup_nlp, "_func", None) or getattr(pharmacy_lookup_nlp, "fn", None)
-                        if underlying_nlp and callable(underlying_nlp):
-                            pharm_text = underlying_nlp(message=area, method="get")
-                        else:
-                            pharm_text = pharmacy_lookup_nlp(message=area, method="get")
-                    except Exception:
-                        pharm_text = UI_TEXT.get("generic_error", "❌ Δεν κατάφερα να φέρω εφημερεύοντα φαρμακεία.")
-
+                # --- ΤΕΛΙΚΟ ΜΗΝΥΜΑ (χωρίς Runner.run/LLM) ---
                 reply = f"**Περιοχή: {area}**\n{pharm_text}"
-                reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent, success=True)
+                reply = inject_trendy_phrase(reply, st=st, intent=intent, success=True)
                 reply = enrich_reply(reply, intent=intent)
                 _push_context(sid, text, reply)
                 return {"reply": reply}
