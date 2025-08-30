@@ -109,10 +109,24 @@
 <body>
 
   <!-- 🔁 Background Video -->
-  <video autoplay muted loop playsinline id="bgVideo">
-    <source src="https://raw.githubusercontent.com/xristoskout/gpt_mr_booky/main/docs/BOOKYVID.mp4">
-    Your browser does not support the video tag.
-  </video>
+<video autoplay muted loop playsinline id="bgVideo">
+  <source id="bgSource" src="" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+<script>
+  const video = document.getElementById("bgVideo");
+  const source = document.getElementById("bgSource");
+  const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  if (isMobile) {
+    source.src = "https://raw.githubusercontent.com/xristoskout/gpt_mr_booky/main/docs/SMARTVID.mp4";
+  } else {
+    source.src = "https://raw.githubusercontent.com/xristoskout/gpt_mr_booky/main/docs/BOOKYVID.mp4";
+  }
+
+  video.load();
+</script>
       <div class="chatbox-wrapper">
         <button class="toggle-chatbox"> GPT Mr Booky</button>
         <div class="chatbox" id="chatbox">
