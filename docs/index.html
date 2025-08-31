@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Mr Booky – Taxi Express Patras</title>
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" />
+  <!-- 🔐 Proxy URL meta -->
+  <meta name="proxy-url" content="https://flask-agent-proxy-160866660933.europe-west1.run.app/api/agent">
   <style>
     html, body {
       height: 100%;
@@ -180,6 +182,9 @@
     const userInput = document.getElementById("user-input");
     const botSound = document.getElementById("botSound");
 
+    // 🔧 Proxy URL από <meta> (fallback για local dev)
+    const PROXY_URL = document.querySelector('meta[name="proxy-url"]')?.content || "http://localhost:5000/api/agent";
+
     // Διαχείριση session
     let session_id = localStorage.getItem("chat_session_id");
     if (!session_id) {
@@ -279,7 +284,7 @@
       chatMessages.scrollTop = chatMessages.scrollHeight;
 
       try {
-        const response = await fetch("https://flask-agent-proxy-160866660933.europe-west1.run.app/api/agent", {
+        const response = await fetch(PROXY_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text, session_id })
