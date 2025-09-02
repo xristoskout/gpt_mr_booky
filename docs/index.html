@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Mr Booky – Taxi Express Patras</title>
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" />
-  <!-- 🔐 Proxy URL meta -->
   <meta name="proxy-url" content="https://flask-agent-proxy-160866660933.europe-west1.run.app/api/agent">
   <style>
     html, body {
@@ -15,23 +14,23 @@
     }
 
     #bgVideo {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    min-width: 100%;
-    min-height: 100%;
-    object-fit: cover;
-    z-index: -1;
-    transition: transform 0.1s ease-out;
-  }
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      min-width: 100%;
+      min-height: 100%;
+      object-fit: cover;
+      z-index: -1;
+      transition: transform 0.1s ease-out;
+    }
 
     @media only screen and (max-width: 768px) {
-    #bgVideo {
-    object-fit: cover;
-    min-width: 100vw;
-    min-height: 100vh;
+      #bgVideo {
+        object-fit: cover;
+        min-width: 100vw;
+        min-height: 100vh;
       }
     }
 
@@ -106,11 +105,40 @@
       .chatbox { top: 0; left: 0; width: 100vw; height: 100svh; border-radius: 0;
         max-width: 100vw; max-height: 100svh; }
     }
+
+    /* ✨ ΝΕΟ animation typing indicator */
+    .typing-indicator {
+      display: inline-block;
+      font-size: 20px;
+      letter-spacing: 3px;
+    }
+
+    .typing-indicator span {
+      opacity: 0;
+      animation: blink 1.5s infinite;
+    }
+
+    .typing-indicator span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .typing-indicator span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
+    .typing-indicator span:nth-child(4) {
+      animation-delay: 0.6s;
+    }
+
+    @keyframes blink {
+      0% { opacity: 0; }
+      50% { opacity: 1; }
+      100% { opacity: 0; }
+    }
   </style>
 </head>
 <body>
 
-  <!-- 🔁 Background Video -->
 <video autoplay muted loop playsinline id="bgVideo">
   <source id="bgSource" src="" type="video/mp4">
   Your browser does not support the video tag.
@@ -129,201 +157,162 @@
 
   video.load();
 </script>
-      <div class="chatbox-wrapper">
-        <button class="toggle-chatbox"> GPT Mr Booky</button>
-        <div class="chatbox" id="chatbox">
-          <div class="chat-header">
-            <div>
-              <strong>Mr Booky</strong><br/>
-              <span style="font-size: 0.65rem; font-weight: normal;">Powered by Taxi Express Patras</span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: auto;">
-              <span class="material-icons close-chat-btn" title="Κλείσιμο" style="cursor: pointer;">close</span>
-              <span class="material-icons" onclick="clearChat()" title="Καθαρισμός" style="cursor: pointer;">delete_sweep</span>
-            </div>
-          </div>
-          <div class="chat-messages" id="chat-messages"></div>
-          <div class="input-area">
-            <input type="text" id="user-input" placeholder="Πληκτρολογήστε..." onkeydown="if(event.key === 'Enter') sendMessage()" />
-            <button onclick="sendMessage()" title="Αποστολή">
-              <span class="material-icons">send</span>
-            </button>
-          </div>
-        </div>
+
+<div class="chatbox-wrapper">
+  <button class="toggle-chatbox"> GPT Mr Booky</button>
+  <div class="chatbox" id="chatbox">
+    <div class="chat-header">
+      <div>
+        <strong>Mr Booky</strong><br/>
+        <span style="font-size: 0.65rem; font-weight: normal;">Powered by Taxi Express Patras</span>
       </div>
-      <script>
-    // Mouse-based parallax
-    document.addEventListener("mousemove", (e) => {
-      const x = (e.clientX / window.innerWidth - 0.5) * 10;
-      const y = (e.clientY / window.innerHeight - 0.5) * 10;
-      const video = document.getElementById("bgVideo");
-      if (video) {
-        video.style.transform = `translate(${x}px, ${y}px) scale(1.05)`;
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: auto;">
+        <span class="material-icons close-chat-btn" title="Κλείσιμο" style="cursor: pointer;">close</span>
+        <span class="material-icons" onclick="clearChat()" title="Καθαρισμός" style="cursor: pointer;">delete_sweep</span>
+      </div>
+    </div>
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="input-area">
+      <input type="text" id="user-input" placeholder="Πληκτρολογήστε..." onkeydown="if(event.key === 'Enter') sendMessage()" />
+      <button onclick="sendMessage()" title="Αποστολή">
+        <span class="material-icons">send</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<audio id="botSound" src="https://raw.githubusercontent.com/xristoskout/Mr-bookie/main/wet-431.mp3" preload="auto"></audio>
+
+<script>
+  const chatbox = document.getElementById("chatbox");
+  const toggleBtn = document.querySelector(".toggle-chatbox");
+  const chatMessages = document.getElementById("chat-messages");
+  const userInput = document.getElementById("user-input");
+  const botSound = document.getElementById("botSound");
+  const PROXY_URL = document.querySelector('meta[name="proxy-url"]')?.content || "http://localhost:5000/api/agent";
+
+  let session_id = localStorage.getItem("chat_session_id");
+  if (!session_id) {
+    session_id = "sess-" + Date.now();
+    localStorage.setItem("chat_session_id", session_id);
+  }
+
+  let chatOpened = false;
+
+  function autoLinkify(text) {
+    const safeText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const linkRegex = /((https?:\/\/[^\s<>()]+)|(tel:\+?\d+)|(mailto:([^\s<>()]+))|(www\.[^\s<>()]+)|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}))/g;
+    return safeText.replace(linkRegex, (match, p1, p2, p3, p4, mailTarget, p6, emailOnly) => {
+      let cleanMatch = match.replace(/[.,?!;]+$/, "");
+      let url = cleanMatch;
+      let label = cleanMatch;
+      if (cleanMatch.startsWith("www.")) { url = "https://" + cleanMatch; }
+      if (cleanMatch.startsWith("tel:")) { label = cleanMatch.replace("tel:", ""); }
+      if (cleanMatch.startsWith("mailto:")) { label = cleanMatch.replace("mailto:", ""); }
+      if (emailOnly) { url = "mailto:" + emailOnly; label = emailOnly; }
+      let html = `<a href="${url}" target="_blank" style="color:#2563eb;text-decoration:underline;">${label}</a>`;
+      if (cleanMatch.includes("booking.infoxoros.com")) {
+        html += `<br><img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(url)}&size=100x100" alt="QR Code" style="margin-top:6px;border-radius:8px;" />`;
       }
+      return html;
     });
+  }
 
-    // Mobile motion-based parallax
-    window.addEventListener("deviceorientation", function(event) {
-      const x = event.gamma; // Left/right tilt
-      const y = event.beta;  // Forward/back tilt
-      const video = document.getElementById("bgVideo");
-      if (video) {
-        video.style.transform = `translate(${x}px, ${y}px) scale(1.05)`;
-      }
-    });
-  </script>
-      <!-- Bot sound -->
-      <audio id="botSound" src="https://raw.githubusercontent.com/xristoskout/Mr-bookie/main/wet-431.mp3" preload="auto"></audio>
+  function appendMessage(content, sender) {
+    const message = document.createElement("div");
+    message.classList.add("message", sender);
+    const bubble = document.createElement("span");
+    bubble.innerHTML = autoLinkify(content);
+    message.appendChild(bubble);
+    chatMessages.appendChild(message);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (sender === "bot") botSound.play().catch(() => {});
+  }
 
-      <script>
-    const chatbox = document.getElementById("chatbox");
-    const toggleBtn = document.querySelector(".toggle-chatbox");
-    const chatMessages = document.getElementById("chat-messages");
-    const userInput = document.getElementById("user-input");
-    const botSound = document.getElementById("botSound");
-
-    // 🔧 Proxy URL από <meta> (fallback για local dev)
-    const PROXY_URL = document.querySelector('meta[name="proxy-url"]')?.content || "http://localhost:5000/api/agent";
-
-    // Διαχείριση session
-    let session_id = localStorage.getItem("chat_session_id");
-    if (!session_id) {
-      session_id = "sess-" + Date.now();
-      localStorage.setItem("chat_session_id", session_id);
-    }
-
-    let chatOpened = false;
-
-    // Εντοπίζει URLs/emails/tel και τα μετατρέπει σε clickable links
-    function autoLinkify(text) {
-      const safeText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      const linkRegex = /((https?:\/\/[^\s<>()]+)|(tel:\+?\d+)|(mailto:([^\s<>()]+))|(www\.[^\s<>()]+)|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}))/g;
-      return safeText.replace(linkRegex, (match, p1, p2, p3, p4, mailTarget, p6, emailOnly) => {
-        let cleanMatch = match.replace(/[.,?!;]+$/, "");
-        let url = cleanMatch;
-        let label = cleanMatch;
-        let icon = "";
-        if (cleanMatch.startsWith("www.")) { url = "https://" + cleanMatch; }
-        if (cleanMatch.startsWith("tel:")) { label = cleanMatch.replace("tel:", ""); }
-        if (cleanMatch.startsWith("mailto:")) { label = cleanMatch.replace("mailto:", ""); }
-        if (emailOnly) { url = "mailto:" + emailOnly; label = emailOnly; }
-        let html = `<a href="${url}" target="_blank" style="color:#2563eb;text-decoration:underline;">${icon} ${label}</a>`;
-        if (cleanMatch.includes("booking.infoxoros.com")) {
-          html += `<br><img src="https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(url)}&size=100x100" alt="QR Code" style="margin-top:6px;border-radius:8px;" />`;
-        }
-        return html;
-      });
-    }
-
-    function appendMessage(content, sender) {
-      const message = document.createElement("div");
-      message.classList.add("message", sender);
-      const bubble = document.createElement("span");
-      bubble.innerHTML = autoLinkify(content);
-      message.appendChild(bubble);
-      chatMessages.appendChild(message);
-      chatMessages.scrollTop = chatMessages.scrollHeight;
-      if (sender === "bot") botSound.play().catch(() => {});
-    }
-
-    // Αν υπάρχει map_url, εμφανίζει κουμπί χάρτη
-    function renderBotResponse(payload) {
-      if (payload.reply) {
-        appendMessage(payload.reply, "bot");
-      }
-      if (payload.map_url) {
-        const mapBtn = document.createElement("div");
-        mapBtn.className = "message bot";
-        const lang = payload.language_code || "el";
-        const label = lang.startsWith("en")
-          ? "📌 View route on map"
-          : "📌 Δες τη διαδρομή στον χάρτη";
-        mapBtn.innerHTML = `
+  function renderBotResponse(payload) {
+    if (payload.reply) appendMessage(payload.reply, "bot");
+    if (payload.map_url) {
+      const mapBtn = document.createElement("div");
+      mapBtn.className = "message bot";
+      const lang = payload.language_code || "el";
+      const label = lang.startsWith("en")
+        ? "📌 View route on map"
+        : "📌 Δες τη διαδρομή στον χάρτη";
+      mapBtn.innerHTML = `
         <a href="${payload.map_url}" target="_blank"
           style="display:inline-block;margin-top:8px;padding:10px 16px;
           background:#2547f3;color:white;border-radius:8px;font-weight:bold;
           text-decoration:none;transition:all 0.3s ease-in-out;">
           ${label}
         </a>`;
-        const mapA = mapBtn.querySelector("a");
-        // Προσθήκη accessibility χαρακτηριστικών
-        mapA.setAttribute("role", "button");
-        mapA.setAttribute("tabindex", "0");
-        mapA.addEventListener("keydown", function(e) {
-          if (e.key === "Enter" || e.key === " ") {
-            window.open(mapA.href, "_blank");
-            e.preventDefault();
-            e.stopPropagation();
-          }
-        });
-        chatMessages.appendChild(mapBtn);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-      }
-    }
-
-    function clearChat() {
-      chatMessages.innerHTML = '';
-      localStorage.removeItem("chat_session_id");
-      session_id = "sess-" + Date.now();
-      localStorage.setItem("chat_session_id", session_id);
-      appendMessage("Η συνομιλία μηδενίστηκε. Ξεκινάμε από την αρχή.", "bot");
-    }
-
-    async function sendMessage() {
-      const text = userInput.value.trim();
-      if (text === "") return;
-      appendMessage(text, "user");
-      userInput.value = "";
-
-      const typing = document.createElement("div");
-      typing.classList.add("message", "bot");
-      const typingSpan = document.createElement("span");
-      typingSpan.textContent = "Ο Mr Booky γράφει...";
-      typing.appendChild(typingSpan);
-      chatMessages.appendChild(typing);
+      chatMessages.appendChild(mapBtn);
       chatMessages.scrollTop = chatMessages.scrollHeight;
-
-      try {
-        const response = await fetch(PROXY_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, session_id })
-        });
-
-        typing.remove();
-        const data = await response.json();
-        // Χρησιμοποιούμε renderBotResponse για να εμφανίσουμε απάντηση και κουμπί χάρτη
-        renderBotResponse(data);
-      } catch (error) {
-        typing.remove();
-        appendMessage("Προέκυψε σφάλμα. Προσπαθήστε ξανά.", "bot");
-      }
     }
+  }
 
-    document.addEventListener("DOMContentLoaded", () => {
-      const closeBtn = document.querySelector(".close-chat-btn");
-      toggleBtn.style.display = "inline-block";
-      chatbox.classList.remove("show");
-      toggleBtn.addEventListener("click", () => {
-        chatbox.classList.add("show");
-        toggleBtn.style.display = "none";
-        if (!chatOpened) {
-          appendMessage("Καλώς ήρθατε! Είμαι ο Mr Booky. Τι μπορώ να κάνω για εσάς;", "bot");
-          chatOpened = true;
-        }
+  function clearChat() {
+    chatMessages.innerHTML = '';
+    localStorage.removeItem("chat_session_id");
+    session_id = "sess-" + Date.now();
+    localStorage.setItem("chat_session_id", session_id);
+    appendMessage("Η συνομιλία μηδενίστηκε. Ξεκινάμε από την αρχή.", "bot");
+  }
+
+  async function sendMessage() {
+    const text = userInput.value.trim();
+    if (text === "") return;
+    appendMessage(text, "user");
+    userInput.value = "";
+
+    const typing = document.createElement("div");
+    typing.classList.add("message", "bot");
+    const typingIndicator = document.createElement("div");
+    typingIndicator.classList.add("typing-indicator");
+    typingIndicator.innerHTML = '<span>.</span><span>.</span><span>.</span><span>.</span>';
+    typing.appendChild(typingIndicator);
+    chatMessages.appendChild(typing);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    try {
+      const response = await fetch(PROXY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, session_id })
       });
-      if (closeBtn) {
-        closeBtn.addEventListener("click", () => {
-          chatbox.classList.remove("show");
-          toggleBtn.style.display = "inline-block";
-        });
-        closeBtn.addEventListener("touchstart", (e) => {
-          e.preventDefault();
-          chatbox.classList.remove("show");
-          toggleBtn.style.display = "inline-block";
-        });
+
+      typing.remove();
+      const data = await response.json();
+      renderBotResponse(data);
+    } catch (error) {
+      typing.remove();
+      appendMessage("Προέκυψε σφάλμα. Προσπαθήστε ξανά.", "bot");
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const closeBtn = document.querySelector(".close-chat-btn");
+    toggleBtn.style.display = "inline-block";
+    chatbox.classList.remove("show");
+    toggleBtn.addEventListener("click", () => {
+      chatbox.classList.add("show");
+      toggleBtn.style.display = "none";
+      if (!chatOpened) {
+        appendMessage("Καλώς ήρθατε! Είμαι ο Mr Booky. Τι μπορώ να κάνω για εσάς;", "bot");
+        chatOpened = true;
       }
     });
-    </script>
-    </body>
-    </html>
+    if (closeBtn) {
+      closeBtn.addEventListener("click", () => {
+        chatbox.classList.remove("show");
+        toggleBtn.style.display = "inline-block";
+      });
+      closeBtn.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        chatbox.classList.remove("show");
+        toggleBtn.style.display = "inline-block";
+      });
+    }
+  });
+</script>
+</body>
+</html>
