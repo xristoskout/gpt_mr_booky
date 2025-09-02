@@ -2,23 +2,23 @@ from __future__ import annotations
 
 """
 This module defines a collection of helper functions and tool wrappers used by the
-Mr Booky assistant. It handles text normalization, tariff calculations, route
+Mr Booky assistant. It handles text normalization, tariff calculations, route
 parsing, trip estimation, taxi contact information, pharmacy and hospital
 lookups, and interactions with the LLM. The file is designed to be imported
 by the main application and can fall back gracefully when optional
 dependencies are missing. The functions decorated with ``@function_tool`` are
 intended to be exposed to the agent runtime as callable tools.
 
-Key changes from the upstream implementation:
+Enhancements in this version:
 
-* Added docstring for clarity and maintainability.
-* Fixed unreachable code in ``pharmacy_lookup_nlp``. Previously the function
-  returned a value and then attempted to set session state using a missing
-  ``RunContextWrapper.current()`` method and an undefined ``result_text``
-  variable. The adjusted implementation cleans up the logic and ensures the
-  function returns at a single point without dangling dead code.
-* Left placeholders for optional trending phrase integration; this can be
-  implemented in upstream functions if desired but is not part of this patch.
+* Added strict JSON Schema-based tools: ``resolve_place`` and ``estimate_fare``.
+  These enforce structured arguments and predictable outputs.
+* Fallback-safe decorator now preserves ``strict`` and ``parameters`` metadata
+  even when the Agents SDK is not installed.
+* ``trip_quote_nlp`` first uses the strict tools pipeline (resolve → estimate)
+  and gracefully falls back to Timologio API or rough estimates.
+* Optional runtime validation via ``jsonschema`` with a light fallback checker.
+* Small utilities (Haversine, normalization) and a tiny local gazetteer for Patras.
 
 The rest of the module closely follows the original code structure, with
 guarded imports and fallbacks to ensure the assistant can operate even when
@@ -34,16 +34,86 @@ from typing import Any, Dict, List, Optional, Tuple
 import unicodedata
 from urllib.parse import quote_plus
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Agents SDK (with compatibility shim)
 try:
     # Import agent helper types from the Agents SDK if available.
-    from agents import function_tool, RunContextWrapper  # type: ignore
+    from agents import function_tool as _sdk_function_tool, RunContextWrapper  # type: ignore
+
+    def function_tool(fn=None, **kwargs):
+        """Compatibility decorator that survives older/newer SDKs.
+        - Filters unknown kwargs for the SDK call.
+        - Tries `strict=False` first to avoid SDK-level strict schema crashes.
+        - If SDK decoration fails, falls back to returning the original function.
+        - Always attaches metadata attributes: name/description/parameters/strict.
+        """
+        allowed = {"name_override", "description_override"}
+        safe = {k: v for k, v in kwargs.items() if k in allowed}
+
+        def _decorate_with_sdk(f):
+            # Attempt with strict=False (newer SDKs may accept), then without.
+            try:
+                return _sdk_function_tool(**safe, strict=False)(f)  # type: ignore[call-arg]
+            except TypeError:
+                # Older SDKs: no `strict` kw
+                return _sdk_function_tool(**safe)(f)
+
+        def _attach_meta(obj, f):
+            # Ensure friendly name/description even if SDK wraps the function
+            if "name_override" in kwargs:
+                try:
+                    setattr(obj, "name", kwargs["name_override"])  # for discovery UIs
+                except Exception:
+                    pass
+            if "description_override" in kwargs:
+                try:
+                    setattr(obj, "description", kwargs["description_override"])  # for discovery UIs
+                except Exception:
+                    pass
+            # Preserve strict + parameters metadata for our runtime
+            if "strict" in kwargs:
+                try:
+                    setattr(obj, "__strict__", bool(kwargs["strict"]))
+                except Exception:
+                    pass
+            if "parameters" in kwargs and kwargs["parameters"]:
+                try:
+                    setattr(obj, "__parameters__", kwargs["parameters"])  # JSON Schema dict
+                except Exception:
+                    pass
+            return obj
+
+        if fn is None:
+            def _wrap(f):
+                try:
+                    obj = _decorate_with_sdk(f)
+                except Exception:
+                    # Fall back to the raw function if the SDK chokes on schema inference
+                    obj = f
+                return _attach_meta(obj, f)
+            return _wrap
+        else:
+            try:
+                obj = _decorate_with_sdk(fn)
+            except Exception:
+                obj = fn
+            return _attach_meta(obj, fn)
 except Exception:  # graceful fallback if Agents SDK missing
     def function_tool(fn=None, **kwargs):
-        """A minimal decorator to attach a name override for tools when the
-        Agents SDK is not available.
+        """A minimal decorator to attach metadata for tools when the
+        Agents SDK is not available. Keeps name/description/parameters/strict
+        as attributes on the underlying function so runtime can still inspect
+        and validate calls.
         """
         def _decorator(f):
+            # User-provided name/description fallbacks
             setattr(f, "name", kwargs.get("name_override", getattr(f, "__name__", "tool")))
+            setattr(f, "description", kwargs.get("description_override", getattr(f, "__doc__", "")))
+            # Preserve strict + parameters metadata
+            if "strict" in kwargs:
+                setattr(f, "__strict__", bool(kwargs["strict"]))
+            if "parameters" in kwargs and kwargs["parameters"]:
+                setattr(f, "__parameters__", kwargs["parameters"])  # JSON Schema dict
             return f
 
         if fn is None:
@@ -57,6 +127,7 @@ except Exception:  # graceful fallback if Agents SDK missing
 # Unicode normalization helpers
 from unicodedata import normalize as _u_norm
 
+# Optional OpenAI client (for ask_llm)
 try:
     from openai import OpenAI  # type: ignore
 except Exception:  # optional dependency
@@ -82,6 +153,41 @@ _Q_TAIL_GL = r"(?:\bposo(?:\s+kostizei)?\b|\bkostizei\b|\bkanei\b|\btimi\b|\?)\s
 
 # Stopwords που ΔΕΝ πρέπει να θεωρηθούν origin/destination
 _ROUTE_STOPWORDS = {"πόσο", "κοστίζει", "κάνει", "τιμή", "poso", "kostizei", "kanei", "timi"}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Strict JSON Schema support (optional jsonschema)
+from typing import TypedDict  # noqa: E402
+try:
+    import jsonschema  # strict runtime validation
+except Exception:  # pragma: no cover
+    jsonschema = None  # type: ignore
+
+# Haversine helper για απόσταση km
+from math import radians, sin, cos, asin, sqrt  # noqa: E402
+
+def _haversine_km(a_lat: float, a_lng: float, b_lat: float, b_lng: float) -> float:
+    R = 6371.0088
+    dlat = radians(b_lat - a_lat)
+    dlng = radians(b_lng - a_lng)
+    aa = sin(dlat/2) ** 2 + cos(radians(a_lat)) * cos(radians(b_lat)) * sin(dlng/2) ** 2
+    return float(2 * R * asin(sqrt(aa)))
+
+# JSON Schema validators (jsonschema if present; else light checks)
+
+def _validate_with_schema(payload: dict, schema: dict, *, where: str = "") -> None:
+    if jsonschema is not None:
+        jsonschema.validate(payload, schema)  # raises on error
+        return
+    # Fallback: required + additionalProperties=False
+    req = set(schema.get("required", []))
+    if not req.issubset(payload.keys()):
+        missing = req - set(payload.keys())
+        raise ValueError(f"Missing required {missing} in {where or 'payload'}")
+    if schema.get("additionalProperties") is False:
+        allowed = set(schema.get("properties", {}).keys())
+        extra = set(payload.keys()) - allowed
+        if extra:
+            raise ValueError(f"Unexpected properties {extra} in {where or 'payload'}")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: text normalization
@@ -164,7 +270,6 @@ try:
 except Exception:
     PharmacyClient = HospitalsClient = PatrasAnswersClient = TimologioClient = None  # type: ignore
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # LLM helper με system prompt από context
 
@@ -237,7 +342,215 @@ def ask_llm(ctx: RunContextWrapper[Any], user_message: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rough distance fallback (διορθωμένα)
+# JSON Schemas for strict tools
+
+PLACE_OBJECT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "place_id": {"type": "string", "minLength": 1},
+        "lat": {"type": "number"},
+        "lng": {"type": "number"},
+        "name": {"type": "string"},
+        "address": {"type": "string"},
+    },
+    "required": ["place_id", "lat", "lng"],
+}
+
+RESOLVE_PLACE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "query": {"type": "string", "minLength": 1},
+        "city": {"type": "string", "default": "Πάτρα"},
+    },
+    "required": ["query"],
+}
+
+ESTIMATE_FARE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "origin": PLACE_OBJECT_SCHEMA,
+        "destination": PLACE_OBJECT_SCHEMA,
+        "when": {"type": "string", "enum": ["day", "night"], "default": "day"},
+        "round_trip": {"type": "boolean", "default": False},
+    },
+    "required": ["origin", "destination"],
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tiny local gazetteer for Patras (extensible)
+
+_GAZETTEER: Dict[str, Dict[str, Any]] = {
+    # Adjust coordinates if you have more precise values
+    "new_port_patras": {
+        "aliases": [
+            "νέο λιμάνι", "νεο λιμανι", "new port", "south port", "akti dimaion", "ακτή δυμαίων",
+        ],
+        "lat": 38.22655,
+        "lng": 21.72131,
+        "name": "Νέο Λιμάνι Πάτρας",
+        "address": "Ακτή Δυμαίων, Πάτρα 263 33",
+    },
+    "ktel_achaias": {
+        "aliases": [
+            "κτελ", "κτελ πατρας", "ktel achaias", "patras bus station", "ζαΐμη 2", "zaimi 2",
+        ],
+        # Provide best-known coords
+        "lat": 38.2448,
+        "lng": 21.7349,
+        "name": "ΚΤΕΛ Αχαΐας",
+        "address": "Ζαΐμη 2 & Όθωνος Αμαλίας, Πάτρα 262 22",
+    },
+}
+
+_alias_to_pid: Dict[str, str] = {}
+for _pid, _rec in _GAZETTEER.items():
+    for _a in _rec.get("aliases", []) or []:
+        _alias_to_pid[_norm_txt(_a)] = _pid
+
+
+def _lookup_gazetteer(q: str) -> Optional[Dict[str, Any]]:
+    key = _norm_txt(q)
+    pid = _alias_to_pid.get(key)
+    if not pid:
+        # try removing Greek articles
+        key2 = re.sub(r"^(το|η|ο|τα|οι)\s+", "", key)
+        pid = _alias_to_pid.get(key2)
+    if pid:
+        r = _GAZETTEER[pid]
+        return {
+            "place_id": pid,
+            "lat": r["lat"],
+            "lng": r["lng"],
+            "name": r.get("name", pid),
+            "address": r.get("address", ""),
+        }
+    return None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Geocoding (OSM/Nominatim)
+
+def geocode_osm(q: str) -> Tuple[float, float]:
+    """Geocode an address using OpenStreetMap's Nominatim API."""
+    r = requests.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": q, "format": "jsonv2", "limit": 1},
+        headers={"User-Agent": "MrBooky/1.0 (+taxi)"},
+        timeout=8,
+    )
+    r.raise_for_status()
+    j = r.json()
+    if not j:
+        raise ValueError(f"Not found: {q}")
+    return float(j[0]["lat"]), float(j[0]["lon"])
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Strict tools
+
+@function_tool(
+    name_override="resolve_place",
+    description_override="Resolve a place in/near Patras to a canonical object with place_id/lat/lng.",
+    parameters=RESOLVE_PLACE_SCHEMA,
+    strict=True,
+)
+def resolve_place(query: str, city: str = "Πάτρα") -> Dict[str, Any]:
+    """
+    Επιστρέφει αντικείμενο {place_id, lat, lng, name, address}.
+    Πρώτα ψάχνει στο τοπικό gazetteer, μετά δοκιμάζει OSM/Nominatim.
+    """
+    payload = {"query": query, "city": city}
+    _validate_with_schema(payload, RESOLVE_PLACE_SCHEMA, where="resolve_place.args")
+
+    # 1) Gazetteer hit
+    hit = _lookup_gazetteer(query)
+    if hit:
+        return hit
+
+    # 2) Fallback: OSM geocoding with city bias
+    q = f"{query}, {city}" if city and _norm_txt(city) not in _norm_txt(query) else query
+    lat, lng = geocode_osm(q)  # raises if not found
+    return {
+        "place_id": f"osm:{_norm_txt(query)[:48]}",
+        "lat": lat,
+        "lng": lng,
+        "name": query.strip(),
+        "address": f"{query.strip()}, {city}".strip().strip(","),
+    }
+
+# Attach metadata for fallback runtime (in case Agents SDK isn't installed)
+try:
+    resolve_place.__strict__ = True
+    resolve_place.__parameters__ = RESOLVE_PLACE_SCHEMA
+except Exception:
+    pass
+
+
+@function_tool(
+    name_override="estimate_fare",
+    description_override="Estimate taxi fare between two resolved places in/near Patras.",
+    parameters=ESTIMATE_FARE_SCHEMA,
+    strict=True,
+)
+def estimate_fare(
+    origin: Dict[str, Any],
+    destination: Dict[str, Any],
+    when: str = "day",
+    round_trip: bool = False,
+) -> Dict[str, Any]:
+    """
+    Υπολογίζει κομίστρα με βάση START_FEE/DAY_KM/NIGHT_KM.
+    Επιστρέφει {distance_km, duration_min, price_eur, night, round_trip, map_url}.
+    """
+    payload = {
+        "origin": origin,
+        "destination": destination,
+        "when": when,
+        "round_trip": round_trip,
+    }
+    _validate_with_schema(payload, ESTIMATE_FARE_SCHEMA, where="estimate_fare.args")
+
+    # Validate sub-objects as well (defense in depth)
+    _validate_with_schema(origin, PLACE_OBJECT_SCHEMA, where="origin")
+    _validate_with_schema(destination, PLACE_OBJECT_SCHEMA, where="destination")
+
+    night = (when or "day") == "night"
+    km_one_way = _haversine_km(origin["lat"], origin["lng"], destination["lat"], destination["lng"])
+    total_km = km_one_way * (2.0 if round_trip else 1.0)
+
+    per_km = NIGHT_KM if night else DAY_KM
+    price = START_FEE + per_km * total_km
+
+    # Urban-ish average speeds for more realistic durations
+    avg_kmh = 26.0 if total_km < 8 else 35.0
+    duration_min = int(round((total_km / max(avg_kmh, 1.0)) * 60))
+
+    map_url = (
+        "https://www.google.com/maps/dir/?api=1"
+        f"&origin={quote_plus(origin.get('address') or origin.get('name', 'origin'))}"
+        f"&destination={quote_plus(destination.get('address') or destination.get('name', 'destination'))}"
+        "&travelmode=driving"
+    )
+
+    return {
+        "distance_km": round(total_km, 2),
+        "duration_min": duration_min,
+        "price_eur": round(price, 2),
+        "night": night,
+        "round_trip": bool(round_trip),
+        "map_url": map_url,
+    }
+
+# Attach metadata for fallback runtime
+try:
+    estimate_fare.__strict__ = True
+    estimate_fare.__parameters__ = ESTIMATE_FARE_SCHEMA
+except Exception:
+    pass
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rough distance + pricing helpers (legacy / fallback)
 
 def _rough_distance_km(origin: str, destination: str) -> float:
     """
@@ -264,7 +577,7 @@ def _estimate_price_and_time_km(
     per_km = NIGHT_KM if night else DAY_KM
     total_km = max(distance_km, 0.0) * (2.0 if round_trip else 1.0)
     cost = START_FEE + per_km * total_km
-    avg_kmh = 83.0  # Assumed average speed (km/h)
+    avg_kmh = 83.0  # Assumed highway average speed (km/h) for long trips
     duration_h = total_km / max(avg_kmh, 1.0)
     duration_min = int(round(duration_h * 60))
     return {"distance_km": round(total_km, 1), "duration_min": duration_min, "price_eur": round(cost, 2)}
@@ -277,7 +590,6 @@ def _round5(eur: float) -> int:
     except Exception:
         return int(eur) if isinstance(eur, int) else 0
     return int(round(x / 5.0)) * 5
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # NLP parsing για διαδρομές
@@ -385,7 +697,6 @@ def _fmt_minutes(mins: Optional[int]) -> Optional[str]:
         return f"{h} ώρες"
     return f"{r} λεπτά"
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Trip quote tools
 
@@ -393,27 +704,58 @@ def _fmt_minutes(mins: Optional[int]) -> Optional[str]:
 def trip_quote_nlp(message: str, when: str = "now") -> str:
     """
     Extract origin/destination from free text and estimate trip cost, distance,
-    and duration. Uses the external Timologio API if available; otherwise
+    and duration. First attempts strict tools (resolve_place → estimate_fare).
+    If that fails, uses the external Timologio API if available; otherwise
     provides a fallback estimate. Always includes a Google Maps link to the
     calculated route. The output is a human-friendly string.
     """
     logger.info("[tool] trip_quote_nlp parse")
-    origin, dest = _extract_route_free_text(message)
-    if not origin or not dest:
+    origin_txt, dest_txt = _extract_route_free_text(message)
+    if not origin_txt or not dest_txt:
         return UI_TEXT.get(
             "ask_trip_route",
             "❓ Πες μου από πού ξεκινάς και πού πας (π.χ. «Από Πάτρα μέχρι Διακοπτό»).",
         )
 
-    night = _detect_night_or_double_tariff(message, when)
-    is_rt = _is_round_trip(message)
+    night_flag = _detect_night_or_double_tariff(message, when)
+    round_trip_flag = _is_round_trip(message)
+
+    # 0) STRICT PIPELINE (preferred)
+    try:
+        o = resolve_place(query=origin_txt)  # dict with place_id/lat/lng
+        d = resolve_place(query=dest_txt)
+        res = estimate_fare(
+            origin=o,
+            destination=d,
+            when=("night" if night_flag else "day"),
+            round_trip=round_trip_flag,
+        )
+        # Format nice reply
+        parts: List[str] = []
+        if round_trip_flag:
+            parts.append(f"💶 Εκτίμηση: {_round5(res['price_eur'])}€ (πήγαινε–έλα)" + (" (νύχτα)" if night_flag else ""))
+            parts.append(
+                f"🛣️ Συνολική απόσταση: ~{res['distance_km']} km"
+            )
+        else:
+            parts.append(f"💶 Εκτίμηση: {_round5(res['price_eur'])}€" + (" (νύχτα)" if night_flag else ""))
+            parts.append(f"🛣️ Απόσταση: ~{res['distance_km']} km")
+        dur_text = _fmt_minutes(res.get("duration_min"))
+        if dur_text:
+            parts.append(f"⏱️ Χρόνος: ~{dur_text}")
+        if res.get("map_url"):
+            parts.append(f"[📌 Δες τη διαδρομή στον χάρτη]({res['map_url']})")
+        parts.append(UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."))
+        return "\n".join(parts)
+    except Exception:
+        logger.exception("strict tools pipeline failed; falling back")
 
     # 1) Timologio API path
     data: Dict[str, Any] = {"error": "unavailable"}
     if TimologioClient is not None:
         try:
             client = TimologioClient()
-            data = client.estimate_trip(origin, dest, when=when)
+            data = client.estimate_trip(origin_txt, dest_txt, when=when)
             logger.debug("[tool] timologio ok: keys=%s", list(data.keys()))
         except Exception:
             logger.exception("[tool] timologio call failed")
@@ -421,7 +763,12 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
     # 2) SUCCESS PATH using external API
     if isinstance(data, dict) and "error" not in data:
         dist = data.get("distance_km") or data.get("km") or data.get("distance")
-        raw_dur = data.get("duration_min") or data.get("minutes") or data.get("duration") or data.get("duration_seconds")
+        raw_dur = (
+            data.get("duration_min")
+            or data.get("minutes")
+            or data.get("duration")
+            or data.get("duration_seconds")
+        )
         mins = _normalize_minutes(raw_dur, distance_km=dist)
         dur_text = _fmt_minutes(mins) if mins is not None else None
         map_url = data.get("map_url") or data.get("mapLink") or data.get("route_url") or data.get("map")
@@ -438,8 +785,8 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
 
         parts: List[str] = []
 
-        if is_rt and km_val is not None:
-            est = _estimate_price_and_time_km(km_val, night=night, round_trip=True)
+        if round_trip_flag and km_val is not None:
+            est = _estimate_price_and_time_km(km_val, night=night_flag, round_trip=True)
             rounded = _round5(est["price_eur"])
             parts.append(f"💶 Εκτίμηση: {rounded}€ (πήγαινε–έλα)")
             parts.append(f"🛣️ Συνολική απόσταση: ~{est['distance_km']} km (2×{round(km_val, 1)} km)")
@@ -447,7 +794,7 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
         else:
             price = data.get("price_eur") or data.get("price") or data.get("total_eur") or data.get("fare")
             if price is None and km_val is not None:
-                est = _estimate_price_and_time_km(km_val, night=night, round_trip=False)
+                est = _estimate_price_and_time_km(km_val, night=night_flag, round_trip=False)
                 price = est["price_eur"]
                 if dur_text is None:
                     dur_text = _fmt_minutes(est["duration_min"])
@@ -465,8 +812,8 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
 
         if not map_url:
             map_url = (
-                f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}"
-                f"&destination={quote_plus(dest)}&travelmode=driving"
+                f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin_txt)}"
+                f"&destination={quote_plus(dest_txt)}&travelmode=driving"
             )
         parts.append(f"[📌 Δες τη διαδρομή στον χάρτη]({map_url})")
         parts.append(UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."))
@@ -474,20 +821,20 @@ def trip_quote_nlp(message: str, when: str = "now") -> str:
 
     # 3) FALLBACK when Timologio is unavailable
     logger.warning("[tool] timologio unavailable, using fallback")
-    one_way_km = _rough_distance_km(origin, dest)
-    est = _estimate_price_and_time_km(one_way_km, night=night, round_trip=is_rt)
+    one_way_km = _rough_distance_km(origin_txt, dest_txt)
+    est = _estimate_price_and_time_km(one_way_km, night=night_flag, round_trip=round_trip_flag)
     dur_text = _fmt_minutes(est["duration_min"]) or "—"
     map_url = (
-        f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin)}"
-        f"&destination={quote_plus(dest)}&travelmode=driving"
+        f"https://www.google.com/maps/dir/?api=1&origin={quote_plus(origin_txt)}"
+        f"&destination={quote_plus(dest_txt)}&travelmode=driving"
     )
 
     label = "Εκτίμηση"
-    rt_flag = " (πήγαινε–έλα)" if is_rt else ""
+    rt_flag = " (πήγαινε–έλα)" if round_trip_flag else ""
     body = [
-        f"💶 {label}: {_round5(est['price_eur'])}€{rt_flag}" + (" (νύχτα)" if night else ""),
-        f"🛣️ {'Συνολική απόσταση' if is_rt else 'Απόσταση'}: ~{est['distance_km']} km"
-        + (f" (2×{round(one_way_km, 1)} km)" if is_rt else ""),
+        f"💶 {label}: {_round5(est['price_eur'])}€{rt_flag}" + (" (νύχτα)" if night_flag else ""),
+        f"🛣️ {'Συνολική απόσταση' if round_trip_flag else 'Απόσταση'}: ~{est['distance_km']} km"
+        + (f" (2×{round(one_way_km, 1)} km)" if round_trip_flag else ""),
         f"⏱️ Χρόνος: ~{dur_text}",
         f"[📌 Δες τη διαδρομή στον χάρτη]({map_url})",
         UI_TEXT.get("fare_disclaimer", "⚠️ Η τιμή δεν περιλαμβάνει διόδια."),
@@ -517,7 +864,6 @@ def trip_estimate(origin: str, destination: str, when: str = "now") -> str:
         logger.exception("trip_estimate failed")
         return "❌ Δεν μπόρεσα να υπολογίσω την εκτίμηση."
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Επαφές Taxi (από constants με fallback σε .env)
 
@@ -543,7 +889,6 @@ def taxi_contact(city: str = "Πάτρα") -> str:
         lines.append("🚖 Εναλλακτικά: Καλέστε στο 2610450000")
         return "\n".join(lines)
     return f"🚖 Δεν έχω ειδικά στοιχεία για {city}. Θέλεις να καλέσω τοπικά ραδιοταξί;"
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Φαρμακεία
@@ -691,7 +1036,6 @@ def pharmacy_lookup_nlp(message: str, method: str = "get") -> str:
         reply = f"💬 {phrase}\n\n{reply}"
     return reply
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Νοσοκομεία / Γενικές Πάτρας
 
@@ -760,37 +1104,23 @@ def notify_booking_slack(payload: dict) -> bool:
     except Exception:
         return False
 
-
-def geocode_osm(q: str) -> Tuple[float, float]:
-    """Geocode an address using OpenStreetMap's Nominatim API."""
-    r = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": q, "format": "jsonv2", "limit": 1},
-        headers={"User-Agent": "MrBooky/1.0 (+taxi)"},
-        timeout=8,
-    )
-    r.raise_for_status()
-    j = r.json()
-    if not j:
-        raise ValueError(f"Not found: {q}")
-    return float(j[0]["lat"]), float(j[0]["lon"])
-
-# -----------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 # Make decorated tools callable when imported directly
-#
-# When the Agents SDK is available, the @function_tool decorator wraps functions
-# in FunctionTool objects that are not directly callable. This causes errors
-# when code expects to call the original function (e.g. pharmacy_lookup(area=…)).
-# To maintain backwards compatibility, detect this case for selected tools and attach
-# a __call__ method that delegates to the underlying implementation (if any).
+# When the Agents SDK is available, @function_tool may wrap functions into
+# objects that aren't directly callable. Keep old behavior by exposing __call__.
 try:
-    for _name in ("pharmacy_lookup", "pharmacy_lookup_nlp", "hospital_duty"):
+    for _name in (
+        "pharmacy_lookup",
+        "pharmacy_lookup_nlp",
+        "hospital_duty",
+        "resolve_place",
+        "estimate_fare",
+    ):
         _obj = globals().get(_name)
         if _obj is not None and not callable(_obj):
             # Try common attribute names that hold the original function
             underlying = getattr(_obj, "func", None) or getattr(_obj, "_func", None) or getattr(_obj, "fn", None)
             if underlying and callable(underlying):
-                # Define a wrapper that forwards calls to the original function
                 def _make_call(u):
                     return lambda *a, **kw: u(*a, **kw)
                 setattr(_obj, "__call__", _make_call(underlying))  # type: ignore

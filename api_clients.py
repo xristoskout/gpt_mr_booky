@@ -19,7 +19,7 @@ def _env_url(*names: str) -> str:
 
 
 class BaseClient:
-    def __init__(self, base_url_env: str, default_path: str = "/", timeout: int = 10, *, alt_env: tuple[str, ...] = ()): 
+    def __init__(self, base_url_env: str, default_path: str = "/", timeout: int = 25, *, alt_env: tuple[str, ...] = ()): 
         base = _env_url(base_url_env, *alt_env)
         if not base:
             raise RuntimeError(f"Missing base URL for {base_url_env} in .env")

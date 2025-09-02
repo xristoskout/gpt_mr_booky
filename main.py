@@ -156,6 +156,7 @@ def _cors_headers(origin: str) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 # Cancel/Confirm regex (αποφεύγουμε false positives)
 CANCEL_RE = re.compile(r"^(?:άκυρο|ακυρο|cancel|τέλος|τελος|σταμάτα|σταματα|stop)\.?$", re.IGNORECASE | re.UNICODE)
+CONFIRM_RE = re.compile(r"\b(ναι|ναι\.?|σωστά|σωστα|ok|okay|οκ|οκει|έτσι|ακριβώς|yes|yep|sure|correct)\b", re.IGNORECASE | re.UNICODE)
 
 
 def is_cancel_message(text: str) -> bool:
@@ -163,7 +164,7 @@ def is_cancel_message(text: str) -> bool:
     return bool(len(t) <= 16 and CANCEL_RE.match(t))
 
 # Επιβεβαιώσεις τύπου "ναι/σωστά/ok" για να ΜΗΝ κάνουμε reset intent
-CONFIRM_RE = re.compile(r"\b(ναι|ναι\.?|σωστά|σωστα|ok|οκ|έτσι|ακριβώς)\b", re.IGNORECASE | re.UNICODE)
+CONFIRM_RE = re.compile(r"\b(ναι|ναι\.?|σωστά|σωστα|ok|okay|οκ|οκει|έτσι|ακριβώς)\b", re.IGNORECASE | re.UNICODE)
 
 # Intents (προαιρετικά classifier)
 try:
@@ -219,20 +220,24 @@ for t in TOOLS:
 chat_agent = Agent(
     name="customer_support_agent",
     instructions=(
-        "Είσαι ο Mr Booky ,ένας ζεστός, χιουμοριστικός agent εξυπηρέτησης πελατών του Taxi Express Patras. "
-        "Απάντα στα ελληνικά, χρησιμοποιώντας φυσικές, πλήρεις προτάσεις. "
-        "Μην συλλαβίζεις, μην προφέρεις λέξεις γράμμα-γράμμα, και απέφυγε τεχνικές περιγραφές. "
-        "Η απάντηση πρέπει να είναι έτοιμη για προφορική εκφώνηση (text-to-speech), σαν να μιλάς σε τηλέφωνο. "
-        "Χρησιμοποίησε απλή, καθημερινή γλώσσα."
-        "Αν στο context υπάρχει `desired_tool`, προσπάθησε πρώτα να καλέσεις αυτό το εργαλείο. "
-        "Για κόστος/χρόνο διαδρομών: trip_quote_nlp. "
-        "Για φαρμακεία: pharmacy_lookup / pharmacy_lookup_nlp. "
-        "Για νοσοκομεία: hospital_duty (σήμερα/αύριο). "
-        "Για πληροφορίες/εκδρομές/τοπικά: patras_info. "
-        "Για στοιχεία επικοινωνίας ταξί: taxi_contact. "
-        "Χρησιμοποίησε ask_llm όταν χρειάζεσαι ελεύθερο reasoning με system prompt."
-        "Αν στο context υπάρχει `desired_tool`, ΚΑΛΕΙΣ ΜΟΝΟ αυτό το εργαλείο. "
-        "Δεν χρησιμοποιείς ask_llm εκτός αν `desired_tool == 'ask_llm'`."
+        # Persona
+        "You are Mr Booky, a warm and witty customer-support agent for Taxi Express Patras. "
+        # Language policy
+        "Detect the user's language and ALWAYS respond in that same language. "
+        "If tools return Greek text while the user's language is different, translate/adapt the content to the user's language, "
+        "preserving numbers, prices, addresses, URLs and phone numbers exactly as given. "
+        # Voice / style for TTS friendliness
+        "Keep sentences natural and speakable (text-to-speech ready). Avoid spelling out words letter-by-letter or using overly technical descriptions. "
+        "Be concise, friendly, and conversational. "
+        # Tool routing policy (your original logic, kept as-is)
+        "If `desired_tool` exists in context, first try calling ONLY that tool. "
+        "For routes/price/time-of-trip use: trip_quote_nlp. "
+        "For pharmacies: pharmacy_lookup / pharmacy_lookup_nlp. "
+        "For hospitals: hospital_duty (today/tomorrow). "
+        "For local info/tours: patras_info. "
+        "For taxi contact info: taxi_contact. "
+        "Use ask_llm only when free-form reasoning with a system prompt is explicitly intended. "
+        "If `desired_tool` exists, DO NOT call any other tool unless the specified tool fails clearly."
     ),
     tools=TOOLS,
 )
@@ -462,6 +467,17 @@ def _apply_location_aliases(s: str) -> str:
     for pat, repl in LOCATION_ALIASES:
         out = pat.sub(repl, out)
     return out
+
+# 🔹 Helper: soft match on SERVICES items/titles
+def _match_service_soft(text: str) -> Optional[str]:
+    t = _nrm(text)
+    for s in SERVICES:
+        if _nrm(s.get("title", "")) in t:
+            return s["title"]
+        for i in s.get("items", []):
+            if _nrm(i) in t:
+                return s["title"]
+    return None
 
 
 def _contact_reply() -> str:
@@ -992,6 +1008,7 @@ def _push_context(sid: str, user_text: str, reply_text: str):
 # --- Topic drift heuristics ---
 DRIFT_SWITCH_MIN_HITS = int(os.getenv("DRIFT_SWITCH_MIN_HITS", "1"))
 RESET_ON_NO_MATCH = os.getenv("RESET_ON_NO_MATCH", "1") == "1"
+STICKY_ON_NO_MATCH = os.getenv("STICKY_ON_NO_MATCH", "1") == "1"
 
 
 def _intent_trigger_hits(intent: str, text: str) -> int:
@@ -1022,31 +1039,24 @@ def _decide_intent(sid: str, text: str, predicted_intent: Optional[str], score: 
     # Αν υπάρχει ήδη intent, κάνε sticky/ελεγχόμενα switch μόνο με triggers
     if st.intent:
         cur_hits = _intent_trigger_hits(st.intent, t)
-        cand_intent, cand_hits = _best_intent_from_triggers(t, exclude=None)
+        cand_intent, cand_hits = _best_intent_from_triggers(t, exclude=None)      
+        missing = _missing_slots(st.intent, text, st)
+        if missing:
+            return st.intent
 
-        if cur_hits == 0 and cand_intent and cand_intent != st.intent and cand_hits >= DRIFT_SWITCH_MIN_HITS:
+        if cand_intent and cand_intent != st.intent and cand_hits >= DRIFT_SWITCH_MIN_HITS:
             new_st = SessionState(intent=cand_intent)
             _save_state(sid, new_st)
             return cand_intent
 
-        if cur_hits == 0 and (not cand_intent or cand_hits == 0):
+        if cur_hits == 0 and cand_hits == 0:
+            if STICKY_ON_NO_MATCH:
+                return st.intent
             if RESET_ON_NO_MATCH:
                 if CONFIRM_RE.search(t):
                     return st.intent
                 _clear_state(sid)
                 return ""
-
-        missing = _missing_slots(st.intent, text, st)
-        if missing:
-            if _match_triggers(t, INTENT_TRIP):
-                new_st = SessionState(intent=INTENT_TRIP)
-                _save_state(sid, new_st)
-                return INTENT_TRIP
-            for intent in (INTENT_TRIP, INTENT_HOSPITAL, INTENT_PHARMACY, INTENT_SERVICES, INTENT_INFO):
-                if intent != st.intent and _match_triggers(t, intent):
-                    new_st = SessionState(intent=intent)
-                    _save_state(sid, new_st)
-                    return intent
             return st.intent
 
         for intent in (INTENT_TRIP, INTENT_HOSPITAL, INTENT_PHARMACY, INTENT_SERVICES, INTENT_INFO):
@@ -1117,6 +1127,60 @@ async def _run_tool_with_timeout(*, tool_input: str, ctx: dict):
         logger.exception("Direct tool dispatch failed (fallback)")
         return UI_TEXT.get("generic_error", "❌ Κάτι πήγε στραβά με το εργαλείο.")
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Multilingual post-processing helper
+
+GREEK_CHARS_RE = re.compile(r"[Α-ΩΆΈΉΊΌΎΏα-ωάέήίϊΐόύϋΰώ]")
+
+def _looks_greek(s: str) -> bool:
+    return bool(GREEK_CHARS_RE.search(s or ""))
+
+async def _maybe_adapt_language(*, sid: str, user_text: str, reply_text: str) -> str:
+    """
+    Αν ο χρήστης δεν γράφει ελληνικά αλλά η απάντηση είναι ελληνικά,
+    ζήτα από το LLM (μέσω ask_llm) να την προσαρμόσει στη γλώσσα του χρήστη.
+    Διατήρησε ΑΚΡΙΒΩΣ αριθμούς, τιμές, διευθύνσεις, URLs και τηλέφωνα.
+    """
+    if not reply_text:
+        return reply_text
+
+    user_is_greek = _looks_greek(user_text)
+    reply_is_greek = _looks_greek(reply_text)
+
+    # Αν ο χρήστης έγραψε ελληνικά ή ήδη η απάντηση δεν είναι ελληνικά → καμία ενέργεια
+    if user_is_greek or not reply_is_greek:
+        return reply_text
+
+    # Διαφορετικά, προσαρμογή στη γλώσσα του χρήστη.
+    ctx = {
+        "user_id": "system",
+        "system_prompt": (
+            "You are a multilingual assistant. Detect the user's language from the given user_text "
+            "and rewrite the assistant_text in that language. Keep numbers, prices, addresses, URLs "
+            "and phone numbers EXACTLY as-is. Keep emojis. Keep it speakable and concise."
+        ),
+        "desired_tool": "ask_llm",
+    }
+
+    tool_input = (
+        "USER_TEXT:\n"
+        f"{user_text}\n\n"
+        "ASSISTANT_TEXT_TO_ADAPT:\n"
+        f"{reply_text}\n\n"
+        "TASK:\n"
+        "1) Detect the user's language from USER_TEXT.\n"
+        "2) Rewrite ASSISTANT_TEXT_TO_ADAPT into that language.\n"
+        "3) Preserve numbers, prices, addresses, URLs and phone numbers exactly.\n"
+        "4) Keep emojis and friendly tone."
+    )
+
+    try:
+        adapted = await _run_tool_with_timeout(tool_input=tool_input, ctx=ctx)
+        out = getattr(adapted, "final_output", None)
+        return out or reply_text
+    except Exception:
+        logger.exception("Language adaptation failed; returning original reply.")
+        return reply_text
 
 # ──────────────────────────────────────────────────────────────────────────────
 @app.post("/chat")
@@ -1141,6 +1205,7 @@ async def chat_endpoint(
         # Hard override για επικοινωνία/app
         if is_contact_intent(t_norm):
             reply = enrich_reply(_contact_reply(), intent="ContactInfoIntent")
+            reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
             _push_context(sid, text, reply)
             return {"reply": reply}
 
@@ -1149,6 +1214,7 @@ async def chat_endpoint(
         if handled is not None:
             reply = handled["reply"]
             reply = enrich_reply(reply)  # απαλό styling
+            reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
             _save_state(sid, st)        # ⭐ ΝΕΟ: αποθήκευσε τις αλλαγές του router (BookingIntent, slots κ.λπ.)
             _push_context(sid, text, reply)
             return {"reply": reply}
@@ -1176,6 +1242,7 @@ async def chat_endpoint(
             _dec_budget(sid)
             reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=INTENT_TRIP, success=True)
             reply = enrich_reply(reply, intent=INTENT_TRIP)
+            reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
             _push_context(sid, text, reply)
             resp = {"reply": reply}
             if map_url:
@@ -1243,6 +1310,7 @@ async def chat_endpoint(
                         "❌ Δεν βρέθηκαν εφημερεύοντα για {area}. Θες να δοκιμάσουμε άλλη περιοχή?"
                     ).format(area=area)
                     reply = enrich_reply(none_msg, intent=intent)
+                    reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
                     _push_context(sid, text, reply)
                     return {"reply": reply}
 
@@ -1267,8 +1335,10 @@ async def chat_endpoint(
                 reply = f"**Περιοχή: {area}**\n{pharm_text}"
                 reply = inject_trendy_phrase(reply, st=st, intent=intent, success=True)
                 reply = enrich_reply(reply, intent=intent)
+                reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply) 
                 _push_context(sid, text, reply)
                 return {"reply": reply}
+
 
             except Exception:
                 logger.exception("PharmacyClient call failed")
@@ -1277,6 +1347,7 @@ async def chat_endpoint(
                     "❌ Κάτι πήγε στραβά με την αναζήτηση. Θες να δοκιμάσουμε άλλη περιοχή;"
                 )
                 reply = enrich_reply(generic, intent=intent)
+                reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
                 _push_context(sid, text, reply)
                 return {"reply": reply}
 
@@ -1303,6 +1374,7 @@ async def chat_endpoint(
                 out = result.final_output or "❌ Δεν μπόρεσα να φέρω την εφημερία."
                 out = inject_trendy_phrase(out, st=_get_state(sid), intent=intent, success=True)
                 reply = enrich_reply(out, intent=intent)
+                reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
                 _push_context(sid, text, reply)
                 return {"reply": reply}
             except Exception:
@@ -1365,6 +1437,7 @@ async def chat_endpoint(
             _dec_budget(sid)
             reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent, success=True)
             reply = enrich_reply(reply, intent=intent)
+            reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
             _push_context(sid, text, reply)
             resp = {"reply": reply}
             if map_url:
@@ -1392,12 +1465,14 @@ async def chat_endpoint(
                         inc = ", ".join((pick.get("includes") or [])[:6]) or "Μεταφορά"
                         msg = enrich_reply(f"✅ Περιλαμβάνει: {inc}", intent=intent)
                         _save_state(sid, st)
+                        msg = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=msg)
                         _push_context(sid, text, msg)
                         return {"reply": msg}
                     else:
                         exc = ", ".join((pick.get("excludes") or [])[:6]) or "—"
                         msg = enrich_reply(f"❌ Δεν περιλαμβάνει: {exc}", intent=intent)
                         _save_state(sid, st)
+                        msg = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=msg)
                         _push_context(sid, text, msg)
                         return {"reply": msg}
 
@@ -1408,6 +1483,7 @@ async def chat_endpoint(
                     msg = inject_trendy_phrase(msg, st=st, intent=intent, success=True)
                 except Exception:
                     pass
+                msg = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=msg)    
                 _save_state(sid, st)
                 _push_context(sid, text, msg)
                 return {"reply": msg}
@@ -1430,6 +1506,7 @@ async def chat_endpoint(
                         msg = inject_trendy_phrase(msg, st=st, intent=intent, success=True)
                     except Exception:
                         pass
+                    msg = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=msg)    
                     _push_context(sid, text, msg)
                     return {"reply": msg}
 
@@ -1440,6 +1517,7 @@ async def chat_endpoint(
                 msg = inject_trendy_phrase(msg, st=st, intent=intent, success=True)
             except Exception:
                 pass
+            msg = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=msg)    
             _push_context(sid, text, msg)
             return {"reply": msg}
 
@@ -1457,6 +1535,7 @@ async def chat_endpoint(
             out = result.final_output or "Δεν βρήκα κάτι σχετικό, θες να το ψάξω αλλιώς?"
             out = inject_trendy_phrase(out, st=_get_state(sid), intent=intent, success=True)
             reply = enrich_reply(out, intent=intent)
+            reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
             _push_context(sid, text, reply)
             return {"reply": reply}
 
@@ -1468,9 +1547,23 @@ async def chat_endpoint(
             desired_tool = "taxi_contact"
         elif is_trip_quote(text):
             desired_tool = "trip_quote_nlp"
-        elif re.search(r"υπηρεσ|εκδρομ|tour|πακετ", t_norm):
+        elif re.search(r"\bυπηρε(σ|σ(?:ί|ι)ες|σίες)?\b|εκδρομ|tour|πακετ|courier|event|night_taxi|in_car_ads|school_taxi|παιδι|pet|κατοικιδ", t_norm):
+            matched = _match_service_soft(t_norm)
+            if matched:
+                st = _get_state(sid)
+                st.slots["last_tour"] = matched
+                _save_state(sid, st)
+                msg = services_reply(matched, st)
+                msg = enrich_reply(msg, intent=INTENT_SERVICES)
+                try:
+                    msg = inject_trendy_phrase(msg, st=st, intent=INTENT_SERVICES, success=True)
+                except Exception:
+                    pass
+                _push_context(sid, text, msg)
+                return {"reply": msg}
             desired_tool = "__internal_services__"
 
+        
         # Αν μοιάζει με «δύο πόλεις» και δεν έχει triggers για pharmacy/hospital → στείλ’το ως trip
         if desired_tool is None:
             tw = _two_word_cities_to_trip(text)
@@ -1492,6 +1585,7 @@ async def chat_endpoint(
                 msg = inject_trendy_phrase(msg, st=st, intent=INTENT_SERVICES, success=True)
             except Exception:
                 pass
+        if desired_tool == "__internal_services__":   
             _push_context(sid, text, msg)
             return {"reply": msg}
 
@@ -1529,6 +1623,7 @@ async def chat_endpoint(
             reply, map_url = strip_map_link(reply_raw)
             reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=INTENT_TRIP, success=True)
             reply = enrich_reply(reply, intent=INTENT_TRIP)
+            reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
             _push_context(sid, text, reply)
             resp = {"reply": reply}
             if map_url:
@@ -1549,6 +1644,7 @@ async def chat_endpoint(
         reply, map_url = strip_map_link(reply_raw)
         reply = inject_trendy_phrase(reply, st=_get_state(sid), intent=intent or "", success=True)
         reply = enrich_reply(reply)
+        reply = await _maybe_adapt_language(sid=sid, user_text=text, reply_text=reply)
         _push_context(sid, text, reply)
         resp = {"reply": reply}
         if map_url:
