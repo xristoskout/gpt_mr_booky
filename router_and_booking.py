@@ -827,6 +827,10 @@ def maybe_handle_followup_or_booking(st: Any, user_text: str) -> Optional[Dict[s
         return baggage_policy_reply(st)
 
     if intent == "TripCost":
+        # Αν ο χρήστης έδωσε μόνο προορισμό, υπέθεσε ότι η παραλαβή είναι από το κέντρο της Πάτρας.
+        if not st.pending_trip.get("origin") and st.pending_trip.get("destination"):
+            # Προεπιλεγμένη αφετηρία· μπορείτε να τη μεταφέρετε σε σταθερά ή να την κάνετε configurable
+            st.pending_trip["origin"] = "Πάτρα"
         if not st.pending_trip.get("origin") or not st.pending_trip.get("destination"):
             return ask_for_missing_slots(st.pending_trip)
         return run_trip_quote_with_luggage(st)

@@ -152,7 +152,10 @@ _Q_TAIL_GR = r"(?:\bπόσο(?:\s+κοστίζει)?\b|\bκοστίζει\b|\bκ
 _Q_TAIL_GL = r"(?:\bposo(?:\s+kostizei)?\b|\bkostizei\b|\bkanei\b|\btimi\b|\?)\s*$"
 
 # Stopwords που ΔΕΝ πρέπει να θεωρηθούν origin/destination
-_ROUTE_STOPWORDS = {"πόσο", "κοστίζει", "κάνει", "τιμή", "poso", "kostizei", "kanei", "timi"}
+_ROUTE_STOPWORDS = {"πόσο", "απο", "μεχρι","εως","εωσ", "κοστίζει", "κάνει", "τιμή", "poso","from", "kostizei", "kanei", "timi"}
+# Default origin used when user specifies only a destination.
+# Feel free to adjust this string (π.χ. σε "Πάτρα") αν θέλετε άλλη προεπιλεγμένη αφετηρία.
+DEFAULT_ORIGIN = "Πάτρα"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Strict JSON Schema support (optional jsonschema)
@@ -623,6 +626,14 @@ def _extract_route_free_text(text: str) -> Tuple[Optional[str], Optional[str]]:
         m = re.search(r"^(?P<d>.+?)\s+από\s+(?P<o>.+)$", s, flags=re.IGNORECASE)
 
     if not m:
+        # Fall back: capture queries that only specify a destination,
+        # e.g. “μέχρι τη Θήβα” ή “για Θήβα” and assume a default origin.
+        m2 = re.search(r"(?:μέχρι|έως|προς|για)\s+(?P<d>.+)$", s, flags=re.IGNORECASE)
+        if m2:
+            d2 = (m2.group("d") or "").strip(" ,.;·")
+            # Ignore trivial destinations and stopwords
+            if d2 and (d2.lower() not in _ROUTE_STOPWORDS) and len(d2) > 1:
+                return DEFAULT_ORIGIN, d2
         return None, None
 
     o = (m.group("o") or "").strip(" ,.;·") if "o" in m.groupdict() else None
